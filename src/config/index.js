@@ -135,6 +135,25 @@ export const config = {
   // can verify a signature the release pipeline produced, not so the server can sign.
   signingTrustedKeys: parsePublicKeys(process.env.SIGNING_TRUSTED_KEYS),
 
+  // External identity (Keycloak). One account across AeroServer, AeroCore and aerotunnel.
+  //
+  // EdDSA only — see core/oidc.js. A Keycloak realm ships RSA keys by default, so an EdDSA
+  // realm key has to be added and selected, or nothing here will verify anything.
+  oidcIssuer: process.env.OIDC_ISSUER || '',
+  oidcJwksUri: process.env.OIDC_JWKS_URI || '',
+  // Audiences are checked per surface and are deliberately different: a token minted for the
+  // fleet API must not open the admin API, nor the reverse.
+  oidcAudienceAdmin: process.env.OIDC_AUDIENCE_ADMIN || 'aeroserver-admin',
+  oidcAudienceFleet: process.env.OIDC_AUDIENCE_FLEET || 'aerocore',
+  // Survives a restart taken while Keycloak is unreachable. Without it a server that reboots
+  // during an IdP outage cannot verify anything until the IdP is back.
+  oidcJwksCacheFile: resolve(process.env.OIDC_JWKS_CACHE_FILE, 'keys/jwks-cache.json'),
+
+  // How /api/v1/* authenticates. `both` is the migration state: a node that already holds a
+  // token uses it, one that does not keeps working on its API key. Moving to `jwt` is a one
+  // line change — and a cutover, so only do it once every node has a token.
+  fleetAuthMode: (process.env.FLEET_AUTH_MODE || 'apikey').trim().toLowerCase(),
+
   // Catalog behaviour
   publicBaseUrl: process.env.PUBLIC_BASE_URL || '',
   strictPlatforms: bool(process.env.STRICT_PLATFORMS, true),

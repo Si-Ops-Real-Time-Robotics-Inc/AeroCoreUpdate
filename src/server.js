@@ -10,6 +10,7 @@ import { closePool, connectWithRetry } from './db/pool.js';
 import { migrate } from './db/migrate.js';
 import { bootstrapAdmin } from './services/auth.service.js';
 import { initSigning, logSigningKey } from './services/signing.service.js';
+import { initOidc } from './core/oidc.js';
 import { setTlsInfo } from './services/tlsInfo.service.js';
 import { listChannels } from './repositories/catalog.repository.js';
 import { pruneCheckLog } from './repositories/telemetry.repository.js';
@@ -27,6 +28,10 @@ async function main() {
 
   await initSigning();
   logSigningKey();
+
+  // Never fatal: a server that cannot reach the IdP must still serve everything that does
+  // not need an IdP token, and initOidc falls back to its on-disk key cache.
+  await initOidc();
 
   const tls = await loadTlsContext();
   setTlsInfo({ enabled: true, ...tls });

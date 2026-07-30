@@ -40,6 +40,11 @@ export async function startServer({ env = {} } = {}) {
   const schema = `test_${crypto.randomBytes(6).toString('hex')}`;
   const tls = await selfSigned(dir);
 
+  // A stand-in identity provider: one Ed25519 key, served as a JWKS. Started before the
+  // dynamic imports below because config/index.js freezes process.env on first import, so
+  // OIDC_JWKS_URI has to know its port by then.
+  const idp = await startFakeIdp();
+
   Object.assign(process.env, {
     NODE_ENV: 'test',
     DATABASE_URL: withSchema(TEST_DATABASE_URL, schema),
@@ -64,6 +69,14 @@ export async function startServer({ env = {} } = {}) {
     SLIM_FALLBACK_TO_FLEET: '1',
     MAINTENANCE: '0',
     ALLOW_PLAINTEXT_HTTP: '0',
+    OIDC_ISSUER: idp.issuer,
+    OIDC_JWKS_URI: idp.jwksUri,
+    OIDC_AUDIENCE_ADMIN: OIDC_AUDIENCE_ADMIN,
+    OIDC_AUDIENCE_FLEET: OIDC_AUDIENCE_FLEET,
+    OIDC_JWKS_CACHE_FILE: path.join(dir, 'jwks-cache.json'),
+    // Suites that exercise the bearer path set this themselves; the default keeps every
+    // existing fleet test on the API key it was written against.
+    FLEET_AUTH_MODE: 'apikey',
     ...env,
   });
 
@@ -79,6 +92,9 @@ export async function startServer({ env = {} } = {}) {
 
   const { initSigning, getPublicKeyBase64 } = await import('../../src/services/signing.service.js');
   await initSigning();
+
+  const { initOidc } = await import('../../src/core/oidc.js');
+  await initOidc();
 
   // Mirror the boot sequence in server.js: the admin UI reads the certificate description
   // from here rather than re-reading the key material on every request.
@@ -130,13 +146,88 @@ export async function startServer({ env = {} } = {}) {
       host: '127.0.0.1', port: plainPort, path: pathname,
     }, init),
 
+    /** Mint a token the way the stand-in IdP would. Defaults produce a valid fleet token. */
+    token: (overrides = {}) => idp.mint(overrides),
+
+    /** Headers for a bearer-authenticated fleet request, mirroring fleetHeaders(). */
+    bearerHeaders: (overrides = {}, extra = {}) => ({
+      Authorization: `Bearer ${idp.mint(overrides)}`,
+      ...extra,
+    }),
+
     async close() {
       await new Promise((resolve) => server.close(resolve));
       if (plainServer) await new Promise((resolve) => plainServer.close(resolve));
+      await idp.close();
       await getPool().query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => {});
       await closePool();
       await fsp.rm(dir, { recursive: true, force: true });
     },
+  };
+}
+
+export const OIDC_AUDIENCE_ADMIN = 'aeroserver-admin';
+export const OIDC_AUDIENCE_FLEET = 'aerocore';
+
+const b64u = (input) => Buffer.from(input).toString('base64url');
+
+/**
+ * A minimal Ed25519 identity provider: a JWKS endpoint and a token minter.
+ *
+ * Real enough to prove the contract — the server fetches the JWKS over HTTP exactly as it
+ * would from Keycloak, and `mint` produces a genuinely signed EdDSA JWT. Every field is
+ * overridable so a test can forge the specific thing it wants rejected.
+ */
+async function startFakeIdp() {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const kid = 'test-ed25519';
+  const jwk = { ...publicKey.export({ format: 'jwk' }), kid, use: 'sig', alg: 'EdDSA' };
+
+  // A second key the server is never told about, for the unknown-kid case.
+  const strangerKey = crypto.generateKeyPairSync('ed25519').privateKey;
+
+  const server = http.createServer((req, res) => {
+    if (!req.url.startsWith('/jwks')) {
+      res.writeHead(404).end();
+      return;
+    }
+    const body = JSON.stringify({ keys: [jwk] });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': body.length });
+    res.end(body);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const issuer = `http://127.0.0.1:${port}/realms/test`;
+
+  function mint({
+    alg = 'EdDSA',
+    kid: overrideKid = kid,
+    iss = issuer,
+    aud = OIDC_AUDIENCE_FLEET,
+    sub = 'a3f1c2d4-0000-4000-8000-000000000001',
+    username = 'testuser',
+    expiresIn = 300,
+    notBefore = null,
+    signWith = privateKey,
+    stranger = false,
+  } = {}) {
+    const now = Math.floor(Date.now() / 1000);
+    const claims = { iss, aud, sub, preferred_username: username, iat: now, exp: now + expiresIn };
+    if (notBefore !== null) claims.nbf = now + notBefore;
+
+    const head = `${b64u(JSON.stringify({ alg, typ: 'JWT', kid: overrideKid }))}`
+      + `.${b64u(JSON.stringify(claims))}`;
+    // `alg: none` carries no signature at all — the shape an attacker sends.
+    if (alg === 'none') return `${head}.`;
+    const signature = crypto.sign(null, Buffer.from(head), stranger ? strangerKey : signWith);
+    return `${head}.${signature.toString('base64url')}`;
+  }
+
+  return {
+    issuer,
+    jwksUri: `http://127.0.0.1:${port}/jwks`,
+    mint,
+    close: () => new Promise((resolve) => server.close(resolve)),
   };
 }
 
