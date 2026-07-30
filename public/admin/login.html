@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign in — AeroCore Update Server</title>
+    <link rel="stylesheet" href="/admin/styles.css" />
+  </head>
+  <body class="centered">
+    <main class="card login">
+      <h1>AeroCore Update Server</h1>
+      <p class="sub">Administrator sign-in</p>
+
+      <form id="login-form" autocomplete="on">
+        <label for="username">Username</label>
+        <input id="username" name="username" autocomplete="username" required autofocus />
+
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required />
+
+        <button type="submit" id="submit">Sign in</button>
+      </form>
+
+      <p id="error" class="error" hidden></p>
+      <p class="hint">Fleet nodes authenticate with an API key and never use this form.</p>
+    </main>
+
+    <script type="module" src="/admin/login.js"></script>
+  </body>
+</html>

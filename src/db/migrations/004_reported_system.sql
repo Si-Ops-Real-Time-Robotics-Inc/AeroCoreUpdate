@@ -1,0 +1,13 @@
+-- What a node claimed to be, as opposed to where the server managed to place it.
+--
+-- The node sends `system` on every check (UpdateClient::check appends it whenever its build
+-- was stamped). When that name is one this server does not have, or contradicts the system of
+-- the release its version belongs to, the server offers nothing and parks the node here.
+--
+-- Without this column the parking is unactionable: an operator sees "SN-42 is unplaced" and
+-- has no way to learn that the device is saying "HERA-2" and that the build script has a typo.
+-- The claim is the single most useful fact about a node that could not be placed.
+--
+-- NULL means the node sent no system at all — an older build, which is a different situation
+-- from a wrong one, and the UI must not conflate them.
+ALTER TABLE unclassified_node ADD COLUMN reported_system TEXT;

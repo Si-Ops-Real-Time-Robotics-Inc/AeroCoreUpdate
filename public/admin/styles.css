@@ -1,0 +1,355 @@
+:root {
+  --bg: #0f1115;
+  --card: #171a21;
+  --border: #262b36;
+  --text: #e6e9ef;
+  --muted: #98a1b3;
+  --accent: #4f8cff;
+  --ok: #35c46a;
+  --warn: #e0a63a;
+  --err: #ff6b6b;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --border: #e2e5ea;
+    --text: #16181d;
+    --muted: #626b7a;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+body.centered {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 1rem;
+}
+
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+
+/* ── layout ─────────────────────────────────────────────────────────────────────────────── */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  padding: 0.85rem 1.25rem;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.topbar h1 { margin: 0; font-size: 1rem; letter-spacing: -0.01em; }
+.topbar .user { margin-left: auto; display: flex; align-items: center; gap: 0.75rem; }
+.topbar .user span { color: var(--muted); font-size: 0.9rem; }
+
+nav { display: flex; gap: 0.25rem; flex-wrap: wrap; }
+nav button {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  padding: 0.35rem 0.75rem;
+  border-radius: 7px;
+  cursor: pointer;
+  font: inherit;
+}
+nav button:hover { color: var(--text); }
+nav button.active { background: var(--bg); border-color: var(--border); color: var(--text); }
+
+main { max-width: 1280px; margin: 0 auto; padding: 1.25rem; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.card h2 {
+  margin: 0 0 0.9rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.login { width: min(400px, 100%); }
+.login h1 { margin: 0; font-size: 1.25rem; }
+.login .sub { margin: 0.2rem 0 1.25rem; color: var(--muted); }
+.login form { display: grid; gap: 0.4rem; }
+.login button { margin-top: 0.75rem; }
+
+/* ── forms ──────────────────────────────────────────────────────────────────────────────── */
+
+.grid {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) 1fr;
+  gap: 0.7rem 1rem;
+  align-items: center;
+}
+.grid > label { color: var(--muted); font-size: 0.9rem; }
+.inline { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem; }
+
+input, select, button, textarea {
+  font: inherit;
+  padding: 0.45rem 0.65rem;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+}
+
+input:focus-visible, select:focus-visible, button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+button {
+  background: var(--accent);
+  border-color: transparent;
+  color: #fff;
+  cursor: pointer;
+}
+button:hover { filter: brightness(1.08); }
+button:disabled { opacity: 0.55; cursor: progress; }
+
+button.ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--muted);
+  padding: 0.25rem 0.6rem;
+  font-size: 0.85rem;
+}
+button.ghost:hover { color: var(--text); }
+button.ghost.danger:hover { color: var(--err); border-color: var(--err); }
+
+button.link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  padding: 0;
+  text-decoration: underline;
+}
+
+.platforms {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 0.3rem;
+}
+.platform { color: var(--muted); font-size: 0.88rem; }
+.platform input { width: auto; }
+
+/* ── dropzone + progress ────────────────────────────────────────────────────────────────── */
+
+.dropzone {
+  border: 2px dashed var(--border);
+  border-radius: 10px;
+  padding: 1.5rem 1rem;
+  text-align: center;
+  color: var(--muted);
+}
+.dropzone.over { border-color: var(--accent); color: var(--text); }
+.dropzone p { margin: 0.2rem 0; }
+
+.progress {
+  height: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: 1rem;
+}
+#progress-bar {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.15s linear;
+}
+
+/* ── tables ─────────────────────────────────────────────────────────────────────────────── */
+
+/* The wrapper scrolls; the table does not squeeze. `width: 100%` alone made every cell wrap
+   its own text instead — `slim (linux-` / `x86_64)` on two lines — which reads as a broken
+   layout rather than as a table that is wider than its column. */
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+th, td {
+  text-align: left;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+/* Free text — release notes, audit detail — is the one thing that should still wrap. */
+td.long, th.long { white-space: normal; min-width: 18rem; }
+th { color: var(--muted); font-weight: 500; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
+td.empty { color: var(--muted); text-align: center; padding: 1rem; }
+.row-actions { display: flex; gap: 0.35rem; }
+
+.release { border: 1px solid var(--border); border-radius: 9px; padding: 0.85rem; margin-bottom: 0.85rem; }
+.release-head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.6rem; }
+.release-head .ghost { margin-left: auto; }
+
+dl { display: grid; grid-template-columns: minmax(150px, auto) 1fr; gap: 0.4rem 1rem; margin: 0; }
+dt { color: var(--muted); }
+dd { margin: 0; word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88rem; }
+
+/* ── bits ───────────────────────────────────────────────────────────────────────────────── */
+
+.tag {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.tag.ok { color: var(--ok); border-color: var(--ok); }
+.tag.warn { color: var(--warn); border-color: var(--warn); }
+/* The Channel column: chips wrap inside the cell rather than stretching the table. */
+/* Two chips in a fixed order. nowrap on the chips so a name never breaks mid-word; the cell
+   itself may wrap when the window is narrow. */
+/* Two chips, one line. They wrap only when the viewport is genuinely too narrow for the
+   table to scroll into. */
+.chan-cell { display: flex; align-items: center; gap: 0.35rem; }
+.chan-cell .tag { white-space: nowrap; }
+
+/* A channel that exists but does not serve this release: present, and clearly not the point. */
+.tag.dim { color: var(--muted); border-color: var(--border); opacity: 0.75; }
+
+.hint { color: var(--muted); font-size: 0.86rem; margin: 0.2rem 0; }
+.empty { color: var(--muted); text-align: center; padding: 1.25rem; }
+
+.error { color: var(--err); }
+.notice { color: var(--ok); }
+
+.banner {
+  max-width: 1080px;
+  margin: 1rem auto -0.25rem;
+  padding: 0.6rem 1rem;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+}
+
+/* Findings from bundle inspection: several problems at once, or several warnings. */
+.findings {
+  margin: 0.5rem 0 0;
+  padding-left: 1.2rem;
+  display: grid;
+  gap: 0.3rem;
+}
+.findings li { line-height: 1.45; }
+
+#inspection h3 {
+  margin: 1rem 0 0.4rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+/* Publish is one action: a dropzone and a button. */
+#upload-form { display: grid; gap: 0.9rem; }
+#upload-form > button[type="submit"] { width: 100%; }
+
+/* Shown only when a config-only bundle turns out to name no platform of its own. */
+.card.inset {
+  margin-top: 1rem;
+  border-color: var(--warn);
+  background: transparent;
+}
+.card.inset h3 {
+  margin: 0 0 0.3rem;
+  font-size: 0.85rem;
+}
+.card.inset .platforms { margin: 0.6rem 0; }
+
+/* The confirm step after a staged upload. */
+.card.inset.ok { border-color: var(--ok); }
+.card.inset .row {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 0.7rem;
+}
+.card.inset .row select { min-width: 10rem; }
+
+/* Config, grouped the way the engine's own System Config screen does it. */
+.cfg-owner { margin-top: 0.9rem; }
+.cfg-owner h4 {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.cfg-sec-hdr {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.6rem 0 0.35rem;
+  cursor: pointer;
+  user-select: none;
+}
+.cfg-sec-arr { font-size: 0.65rem; color: var(--muted); transition: transform 0.15s; }
+.cfg-sec-arr.col { transform: rotate(-90deg); }
+.cfg-sec-lbl {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.cfg-sec-cnt {
+  font-size: 0.62rem;
+  font-family: ui-monospace, Consolas, monospace;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  padding: 0.05rem 0.4rem;
+}
+.cfg-sec-line { flex: 1; height: 1px; background: var(--border); }
+
+.cfg-param-rows {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.cfg-prow {
+  display: grid;
+  grid-template-columns: minmax(9rem, 1fr) minmax(9rem, 1.4fr) 7.5rem;
+  border-bottom: 1px solid var(--border);
+  align-items: center;
+}
+.cfg-prow:last-child { border-bottom: none; }
+.cfg-prow > div { padding: 0.4rem 0.6rem; overflow-wrap: anywhere; }
+.cfg-prow-hdr { background: color-mix(in srgb, var(--border) 35%, transparent); }
+.cfg-ph {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.cfg-pr-key { font-family: ui-monospace, Consolas, monospace; font-size: 0.85rem; }
+
+@media (max-width: 700px) {
+  .cfg-prow { grid-template-columns: 1fr 1fr; }
+  .cfg-prow > .cfg-pr-lock { grid-column: 1 / -1; padding-top: 0; }
+}
+.cfg-psec { margin-bottom: 0.5rem; }
+.cfg-pr-val { font-family: ui-monospace, Consolas, monospace; font-size: 0.85rem; }

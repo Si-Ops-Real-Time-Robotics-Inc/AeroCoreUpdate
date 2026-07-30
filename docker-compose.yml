@@ -1,0 +1,82 @@
+name: aeroserver
+
+volumes:
+  pgdata:
+    name: aeroserver-pgdata     # persistent: catalog, reports, audit, admin accounts
+  data:
+    name: aeroserver-data       # persistent: artifacts, OTA signing key, TLS material
+
+networks:
+  aeroserver:
+    name: aeroserver
+
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: aeroserver-db
+    networks: [aeroserver]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: aeroserver
+      POSTGRES_USER: aeroserver
+      # `:?` refuses to start rather than running with an empty password.
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aeroserver -d aeroserver"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  aeroserver:
+    build: .
+    image: aeroserver:latest
+    container_name: aeroserver
+    networks: [aeroserver]
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - data:/data
+    ports:
+      - "9443:9443"             # HTTPS: fleet API and admin UI
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://aeroserver:${DB_PASSWORD}@db:5432/aeroserver
+      PORT: "9443"
+      TLS_CN: ${TLS_CN:-aeroserver}
+      # Every address a client dials from outside this host. A certificate that does not name
+      # the address fails verification there — the usual reason the UI works on localhost only.
+      TLS_SAN: ${TLS_SAN:-}
+      # Where a fresh upload lands: `beta`, the test group, leaving stable untouched until an
+      # admin promotes. `-` not `:-` on purpose — an unset variable takes the default, while an
+      # explicitly empty one is passed through and means "land nowhere".
+      AUTO_PROMOTE_CHANNEL: ${AUTO_PROMOTE_CHANNEL-beta}
+      # Refuse a config payload that is not cumulative; see README.
+      REQUIRE_CUMULATIVE_CONFIG: ${REQUIRE_CUMULATIVE_CONFIG:-1}
+      DEFAULT_SYSTEM: ${DEFAULT_SYSTEM:-default}
+      # Require a config component in every release; see README.
+      REQUIRE_CONFIG_COMPONENT: ${REQUIRE_CONFIG_COMPONENT:-0}
+      # The node protects locked params itself; turn on to refuse instead of warn.
+      REFUSE_CONFIG_LIFELINE: ${REFUSE_CONFIG_LIFELINE:-0}
+      # Serve only versions a channel points at; see README before turning this on.
+      DOWNLOAD_REQUIRES_CHANNEL: ${DOWNLOAD_REQUIRES_CHANNEL:-0}
+
+      UPDATE_API_KEYS: ${UPDATE_API_KEYS:?set UPDATE_API_KEYS in .env}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      # Leave empty to have a password generated and printed once at first boot.
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+
+      SIGNING_KEY_ID: ${SIGNING_KEY_ID:-rtr-ota-2026}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      UPLOAD_MAX_BYTES: ${UPLOAD_MAX_BYTES:-536870912}
+      CHECK_LOG_RETENTION_DAYS: ${CHECK_LOG_RETENTION_DAYS:-90}
+
+      # Escape hatch. The node has no TLS backend (spec section 10), so if the fleet cannot
+      # reach an HTTPS-only server, set this to 1 and expose HTTP_PORT as well. It serves
+      # /api/v1 only — /admin still refuses plaintext with 426.
+      ALLOW_PLAINTEXT_HTTP: ${ALLOW_PLAINTEXT_HTTP:-0}
+      HTTP_PORT: "9099"
+    restart: unless-stopped

@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AeroCore Update Server</title>
+    <link rel="stylesheet" href="/admin/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>AeroCore Update Server</h1>
+      <nav id="tabs">
+        <button data-tab="publish" class="active">Publish</button>
+        <button data-tab="systems">Systems</button>
+        <button data-tab="catalog">Catalog</button>
+        <button data-tab="fleet">Fleet</button>
+        <button data-tab="rollout">Rollout</button>
+        <button data-tab="security">Security</button>
+      </nav>
+      <div class="user">
+        <span id="whoami"></span>
+        <button id="signout" class="ghost">Sign out</button>
+      </div>
+    </header>
+
+    <p id="error" class="error banner" hidden></p>
+    <p id="notice" class="notice banner" hidden></p>
+
+    <main>
+      <!-- Publish ------------------------------------------------------------------->
+      <section id="tab-publish" class="tab">
+        <div class="card">
+          <h2>Publish</h2>
+
+          <form id="upload-form">
+            <div id="dropzone" class="dropzone">
+              <input id="u-file" type="file" accept=".gz,.tgz,application/gzip" hidden />
+              <p>Drop a <code>.tar.gz</code> here, or <button type="button" id="browse" class="link">browse</button></p>
+              <p id="filename" class="hint"></p>
+            </div>
+
+            <button type="submit" id="upload-btn">Upload</button>
+          </form>
+
+          <p class="hint">
+            Version, platforms, plugin versions and config params all come out of the bundle.
+            Release notes and <code>min_version</code> come from an optional
+            <code>release.json</code> inside it.
+          </p>
+
+          <div id="progress-wrap" hidden>
+            <div class="progress"><div id="progress-bar"></div></div>
+            <p id="progress-text" class="hint"></p>
+          </div>
+
+          <!--
+            Only a config-only bundle covers no platform of its own, so this stays hidden
+            until the server says it needs them. Nothing else on this screen is a question.
+          -->
+          <div id="platform-prompt" class="card inset" hidden>
+            <h3>Which platforms does this config apply to?</h3>
+            <p class="hint">This bundle contains only config components, so it names no platform.</p>
+            <div id="platform-boxes" class="platforms"></div>
+            <button type="button" id="retry-upload">Upload with these platforms</button>
+          </div>
+
+          <div id="inspection" hidden></div>
+
+          <!-- Nothing reaches a node until this is pressed. -->
+          <!--
+            Step two. The bundle is open and described above but nothing is stored yet;
+            pressing this writes it and puts it on beta. There is no channel to choose — a
+            release reaches stable only when an admin promotes it from the Catalog.
+          -->
+          <div id="commit-wrap" class="card inset ok" hidden>
+            <h3 id="commit-title">Nothing stored yet</h3>
+            <p class="hint" id="commit-hint"></p>
+            <div class="row">
+              <button type="button" id="commit-upload">Upload to beta</button>
+              <button type="button" id="commit-discard" class="link">Discard</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Catalog ------------------------------------------------------------------->
+      <section id="tab-catalog" class="tab" hidden>
+        <div class="card">
+          <h2>Releases <span id="catalog-rev" class="hint"></span></h2>
+          <div id="catalog-list"></div>
+        </div>
+
+        <!-- Filled on demand by the Details button on an artifact row. -->
+        <div id="artifact-details" hidden></div>
+
+        <!-- Filled by the Promote button. Nothing moves until the button inside is pressed. -->
+        <div id="promote-panel" hidden></div>
+      </section>
+
+      <!-- Systems ------------------------------------------------------------------->
+      <section id="tab-systems" class="tab" hidden>
+        <div class="card">
+          <h2>Systems</h2>
+          <p class="hint">
+            The kinds of device AeroCore runs on. Each has its own plugin set, its own config
+            and its own version line. A bundle names its system in the
+            <code>system</code> field its build stamps into every manifest, and a node is
+            placed by the version it reports.
+          </p>
+          <div id="system-list"></div>
+        </div>
+
+        <div class="card">
+          <h2>Create a system</h2>
+          <form id="system-form" class="grid">
+            <label for="s-name">Name</label>
+            <input id="s-name" placeholder="drone" required />
+            <label for="s-desc">Description</label>
+            <input id="s-desc" placeholder="Airframes running the Camera and SRTunnel plugins" />
+            <span></span>
+            <button type="submit">Create</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>Unplaced nodes <span id="unclassified-count" class="hint"></span></h2>
+          <p class="hint">
+            Nodes reporting a version this server never published — factory-fresh or hand
+            flashed. They are offered nothing until assigned, because guessing would mean
+            pushing one system's firmware to another.
+          </p>
+          <div id="unclassified-list"></div>
+        </div>
+      </section>
+
+      <!-- Fleet --------------------------------------------------------------------->
+      <section id="tab-fleet" class="tab" hidden>
+        <div class="card">
+          <h2>Fleet inventory</h2>
+          <p class="hint">Last reported by each serial when it checked for updates.</p>
+          <div id="fleet-list"></div>
+        </div>
+      </section>
+
+      <!-- Rollout ------------------------------------------------------------------->
+      <section id="tab-rollout" class="tab" hidden>
+        <div class="card">
+          <h2>Rollout results</h2>
+          <form id="rollout-form" class="inline">
+            <select id="ro-version"></select>
+            <button type="submit">Show</button>
+          </form>
+          <div id="rollout-stats"></div>
+        </div>
+        <div class="card">
+          <h2>Recent reports</h2>
+          <div id="rollout-recent"></div>
+        </div>
+      </section>
+
+      <!-- Security ------------------------------------------------------------------>
+      <section id="tab-security" class="tab" hidden>
+        <div class="card">
+          <h2>OTA signing key</h2>
+          <p class="hint">Provision this public key into each node's <code>key_id &rarr; key</code> map.</p>
+          <dl id="signing-key"></dl>
+        </div>
+        <div class="card">
+          <h2>Fleet API key</h2>
+          <p class="hint">
+            What a node sends as <code>X-API-Key</code>. One key is shared by every node in a
+            fleet, so rotating it means re-provisioning them all. Reading it here is recorded in
+            the audit log.
+          </p>
+          <div id="api-keys"></div>
+        </div>
+
+        <div class="card">
+          <h2>TLS certificate</h2>
+          <dl id="tls-info"></dl>
+        </div>
+        <div class="card">
+          <h2>Change password</h2>
+          <form id="password-form" class="grid">
+            <label for="p-current">Current password</label>
+            <input id="p-current" type="password" autocomplete="current-password" required />
+            <label for="p-new">New password</label>
+            <input id="p-new" type="password" autocomplete="new-password" minlength="12" required />
+            <span></span>
+            <button type="submit">Change password</button>
+          </form>
+          <p class="hint">Changing it signs out every session, including this one.</p>
+        </div>
+        <div class="card">
+          <h2>Audit log</h2>
+          <div id="audit-list"></div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/admin/app.js"></script>
+  </body>
+</html>

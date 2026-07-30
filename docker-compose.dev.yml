@@ -1,0 +1,24 @@
+# Development overlay. Never loaded automatically — pass it explicitly:
+#
+#   npm run dev:docker          bring the stack up with the working tree mounted
+#   npm run dev:reload          apply a change to src/ (public/ needs nothing)
+#
+# The production image bakes src/ and public/ in, which is right for shipping and wrong for
+# debugging: every one-line change costs a full rebuild. Here they are mounted read-only from
+# the working tree instead, so the container runs exactly the files being edited.
+#
+# Read-only on purpose. The container must never be able to write back into the repository —
+# it runs as `node` (uid 1000), the same uid as the developer on most machines, so a stray
+# write would land in the working tree looking like an edit nobody made.
+services:
+  aeroserver:
+    volumes:
+      - ./src:/app/src:ro
+      - ./public:/app/public:ro
+    environment:
+      # Readable logs while debugging. Production keeps the default.
+      LOG_LEVEL: debug
+      # The whole point of the dev loop is watching a real upload land somewhere: leave the
+      # shipped default in place rather than pinning it here, so what is debugged is what
+      # ships. Override in .env if a session needs something else.
+      NODE_ENV: production
