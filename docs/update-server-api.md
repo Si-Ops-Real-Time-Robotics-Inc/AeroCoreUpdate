@@ -611,6 +611,16 @@ The node downloads and executes this code. Be explicit about what each control d
 
 **The API key** (`X-API-Key`) keeps scanners and casual clients out and gives you per-fleet revocation. It is **not** an identity proof — over plain HTTP, anyone who reads `core.json` on a device or sniffs the wire has it. Treat it as a coarse gate, never as authorization for anything sensitive.
 
+**A Keycloak bearer token** (`Authorization: Bearer`) is the alternative, and it is a real identity: it names the person who signed in, expires on its own, and is revoked for one operator without touching anyone else. `FLEET_AUTH_MODE` selects which credential this server accepts — `apikey`, `both`, or `jwt`.
+
+`both` is the state a fleet migrates through, and it exists because swapping the fleet credential is a **cutover**: a node that has not been given a token yet must keep updating, or the switch strands everything at once. Move to `jwt` only after every node holds one.
+
+Tokens must be **EdDSA (Ed25519)** signed. Not a preference — an AeroCore node built for Android links no OpenSSL, so RS256 is unverifiable there, while Ed25519 is available on every platform because Crypto++ is linked unconditionally. A Keycloak realm ships RSA keys by default, so this needs an EdDSA realm key added and selected.
+
+The `aud` claim is checked per surface: a token minted for the fleet API does not open the admin API, nor the reverse. Keycloak omits `aud` unless the client carries an audience mapper, so add one or every token is refused.
+
+**What the token does NOT decide** is what gets installed. That remains the Ed25519 manifest signature and, where used, its root-signed key certificate. Keeping the two apart is deliberate: an identity provider compromise then costs an attacker the ability to *ask* for updates, not the ability to *ship* them.
+
 **The signature is the real control.** A network attacker who can intercept plain HTTP can rewrite the manifest, but cannot forge Ed25519 without the private key, so the node rejects the substitution. This is what makes running over plain HTTP tolerable at all. Do not make the signature optional in your server, and do not let a node skip it.
 
 **The `sha256`** is verified again after download. On its own it proves only that the bytes match the manifest — and an attacker who rewrote the manifest would rewrite the hash too. Its value comes from being *inside the signed payload*: the signature binds the manifest, and the manifest binds the bytes.

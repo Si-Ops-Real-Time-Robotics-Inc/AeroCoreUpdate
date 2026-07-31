@@ -3,7 +3,7 @@
   "info": {
     "title": "AeroCore Update Server API",
     "version": "1.0.0",
-    "description": "Contract between an update server and a GCS node that pulls updates from it. The node identifies itself (serial, platform, installed version, channel) and the server decides what it should be running, which enables staged rollout, per-serial pinning and stopping a bad release without touching the fleet.\n\nNormative prose, the signature payload definition and a reference implementation: docs/update-server-api.md.\n\nThe downloaded body is an ordinary component-aware OTA package as produced by scripts/package_update_bundle.sh — this protocol introduces no new package format.",
+    "description": "Contract between an update server and a GCS node that pulls updates from it. The node identifies itself (serial, platform, installed version, channel) and the server decides what it should be running, which enables staged rollout, per-serial pinning and stopping a bad release without touching the fleet.\n\nNormative prose, the signature payload definition and a reference implementation: docs/update-server-api.md.\n\nThe downloaded body is an ordinary component-aware OTA package as produced by scripts/package_update_bundle.sh \u2014 this protocol introduces no new package format.",
     "contact": {
       "name": "Real-Time Robotics Inc.",
       "email": "duy.nguyen@rtrobotics.me"
@@ -32,6 +32,9 @@
   "security": [
     {
       "ApiKeyAuth": []
+    },
+    {
+      "BearerAuth": []
     }
   ],
   "paths": {
@@ -41,7 +44,7 @@
           "update"
         ],
         "summary": "Ask what this device should be running",
-        "description": "Safe, idempotent and cacheable — poll freely within the etiquette in the prose doc (suggested: hourly, jittered, honouring Retry-After).\n\nReturn `{\"update_available\": false}` — not a 404 — both when the node is current and when the server is deliberately withholding an update from this device (paused rollout, pinned serial). The node treats the two identically.",
+        "description": "Safe, idempotent and cacheable \u2014 poll freely within the etiquette in the prose doc (suggested: hourly, jittered, honouring Retry-After).\n\nReturn `{\"update_available\": false}` \u2014 not a 404 \u2014 both when the node is current and when the server is deliberately withholding an update from this device (paused rollout, pinned serial). The node treats the two identically.",
         "operationId": "checkUpdate",
         "parameters": [
           {
@@ -194,7 +197,7 @@
           "update"
         ],
         "summary": "Download the package",
-        "description": "Body is a component-aware OTA package (.tar.gz).\n\nContent-Length is mandatory and must be exact — the node uses it for a real progress percentage and to reject a truncated body early, so chunked transfer without a length degrades both.\n\nRange support only needs the open-ended `bytes=N-` form, which is all a resuming download uses. Multi-range is not required; reject it with 416 if unimplemented.\n\nWith no `platform`, serve the fleet catalog artifact (all platforms in one). With `platform`, serve the slim artifact for it.\n\nComponents a bundle may carry: `core` (binary + webui/docs, restart), `plugin` (per-platform, hot-loaded), `config` (slim value-only param payload per target; plugin params apply live, core params on next restart). Locked/readonly params are skipped by the node rather than overwritten. Unknown component types are skipped, not fatal.",
+        "description": "Body is a component-aware OTA package (.tar.gz).\n\nContent-Length is mandatory and must be exact \u2014 the node uses it for a real progress percentage and to reject a truncated body early, so chunked transfer without a length degrades both.\n\nRange support only needs the open-ended `bytes=N-` form, which is all a resuming download uses. Multi-range is not required; reject it with 416 if unimplemented.\n\nWith no `platform`, serve the fleet catalog artifact (all platforms in one). With `platform`, serve the slim artifact for it.\n\nComponents a bundle may carry: `core` (binary + webui/docs, restart), `plugin` (per-platform, hot-loaded), `config` (slim value-only param payload per target; plugin params apply live, core params on next restart). Locked/readonly params are skipped by the node rather than overwritten. Unknown component types are skipped, not fatal.",
         "operationId": "downloadUpdate",
         "parameters": [
           {
@@ -211,7 +214,7 @@
             "name": "platform",
             "in": "query",
             "required": true,
-            "description": "The node's platform. REQUIRED — it selects the slim artifact built for it, and validates that a fleet artifact actually covers it. A package with no matching variant is 404 rather than bytes the node would install nothing from.",
+            "description": "The node's platform. REQUIRED \u2014 it selects the slim artifact built for it, and validates that a fleet artifact actually covers it. A package with no matching variant is 404 rather than bytes the node would install nothing from.",
             "schema": {
               "$ref": "#/components/schemas/Platform"
             },
@@ -361,7 +364,7 @@
           "telemetry"
         ],
         "summary": "Report the outcome of an update (optional)",
-        "description": "Recommended, not required — a minimal server may omit it and return 404. Without it you cannot tell a rollout is failing until someone phones in.\n\nThe node treats any failure here as non-fatal and does not retry: reporting must never block an update.",
+        "description": "Recommended, not required \u2014 a minimal server may omit it and return 404. Without it you cannot tell a rollout is failing until someone phones in.\n\nThe node treats any failure here as non-fatal and does not retry: reporting must never block an update.",
         "operationId": "reportUpdate",
         "requestBody": {
           "required": true,
@@ -423,7 +426,7 @@
           "health"
         ],
         "summary": "Reachability probe",
-        "description": "No auth required. Lets a node — and your monitoring — distinguish \"server unreachable\" from \"no update available\", which are very different operationally.",
+        "description": "No auth required. Lets a node \u2014 and your monitoring \u2014 distinguish \"server unreachable\" from \"no update available\", which are very different operationally.",
         "operationId": "health",
         "security": [],
         "responses": {
@@ -468,6 +471,12 @@
         "in": "header",
         "name": "X-API-Key",
         "description": "Shared key, stored as a locked param in the node's core.json. Keeps scanners out and gives per-fleet revocation. NOT an identity proof: over plain HTTP anyone who reads core.json or sniffs the wire has it. The manifest signature, not this key, is what protects package integrity."
+      },
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Keycloak access token, EdDSA (Ed25519) signed. EdDSA rather than RS256 because an Android node links no OpenSSL and cannot verify RSA. The `aud` claim must name the fleet audience; a token minted for the admin API is refused here. Which credential this server accepts is set by FLEET_AUTH_MODE: apikey, both, or jwt."
       }
     },
     "parameters": {
@@ -484,7 +493,7 @@
     },
     "headers": {
       "ETag": {
-        "description": "Must be a function of everything that affects the response — at minimum version, platform and channel — so a rollout change invalidates it.",
+        "description": "Must be a function of everything that affects the response \u2014 at minimum version, platform and channel \u2014 so a rollout change invalidates it.",
         "schema": {
           "type": "string"
         },
@@ -501,7 +510,7 @@
     "schemas": {
       "Version": {
         "type": "string",
-        "description": "Dotted numeric MAJOR.MINOR.PATCH. Compared component-wise as INTEGERS with the shorter side zero-padded, so 0.9.0 < 0.10.0. Never compare these as strings — lexically \"0.9.0\" > \"0.10.0\", which silently inverts the rollout.",
+        "description": "Dotted numeric MAJOR.MINOR.PATCH. Compared component-wise as INTEGERS with the shorter side zero-padded, so 0.9.0 < 0.10.0. Never compare these as strings \u2014 lexically \"0.9.0\" > \"0.10.0\", which silently inverts the rollout.",
         "pattern": "^[0-9]+(\\.[0-9]+)*$",
         "example": "0.15.0"
       },
@@ -577,12 +586,12 @@
           },
           "sha256": {
             "type": "string",
-            "description": "Lowercase hex SHA-256 of the package. Its value comes from being inside the signed payload — the signature binds the manifest, the manifest binds the bytes.",
+            "description": "Lowercase hex SHA-256 of the package. Its value comes from being inside the signed payload \u2014 the signature binds the manifest, the manifest binds the bytes.",
             "pattern": "^[0-9a-f]{64}$"
           },
           "target": {
             "type": "string",
-            "description": "The platform set this artifact covers, canonicalised: one platform for a slim artifact, or every platform in a catalog bundle SORTED ASCENDING and comma-joined with no spaces (e.g. \"android-aarch64,linux-x86_64\"). Sorting is what lets two implementations derive the same signed string.\n\nThe node needs this to rebuild the signed payload, and MUST also confirm its own platform is a member of the set — verifying the signature alone would let an attacker replay a genuine manifest issued for a different platform.",
+            "description": "The platform set this artifact covers, canonicalised: one platform for a slim artifact, or every platform in a catalog bundle SORTED ASCENDING and comma-joined with no spaces (e.g. \"android-aarch64,linux-x86_64\"). Sorting is what lets two implementations derive the same signed string.\n\nThe node needs this to rebuild the signed payload, and MUST also confirm its own platform is a member of the set \u2014 verifying the signature alone would let an attacker replay a genuine manifest issued for a different platform.",
             "example": "android-aarch64,linux-x86_64"
           },
           "min_version": {
@@ -638,7 +647,7 @@
       },
       "Signature": {
         "type": "object",
-        "description": "Ed25519 over a fixed-order, newline-delimited payload — NOT over the JSON. Canonical-JSON schemes invite two implementations disagreeing about key order and whitespace, and the failure is silent.\n\npayload = version \\n size \\n sha256 \\n target \\n min_version \\n published_at\n\nExactly six fields in this order, joined by U+000A, no trailing newline. `size` is a plain decimal integer. `target` is the canonical platform set (see the UpdateAvailable.target schema). An absent optional field contributes the empty string, so the separators remain. Encode UTF-8, sign, base64 the 64-byte signature.\n\nVerification is TWO steps: check the signature, then check that this node's platform is in `target`. See docs/update-server-api.md §7 for a worked example.",
+        "description": "Ed25519 over a fixed-order, newline-delimited payload \u2014 NOT over the JSON. Canonical-JSON schemes invite two implementations disagreeing about key order and whitespace, and the failure is silent.\n\npayload = version \\n size \\n sha256 \\n target \\n min_version \\n published_at\n\nExactly six fields in this order, joined by U+000A, no trailing newline. `size` is a plain decimal integer. `target` is the canonical platform set (see the UpdateAvailable.target schema). An absent optional field contributes the empty string, so the separators remain. Encode UTF-8, sign, base64 the 64-byte signature.\n\nVerification is TWO steps: check the signature, then check that this node's platform is in `target`. See docs/update-server-api.md \u00a77 for a worked example.",
         "properties": {
           "alg": {
             "type": "string",
