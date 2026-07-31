@@ -198,6 +198,39 @@ export function validateKeyCertificateBody(body) {
   };
 }
 
+const USERNAME_RE = /^[a-z0-9][a-z0-9._-]{2,63}$/i;
+
+/** A new account, as typed into the admin UI. Keycloak enforces its own password policy;
+ *  this only rejects what would produce a confusing error there. */
+export function validateNewUser(body) {
+  if (!body || typeof body !== 'object') throw missingParameter('body');
+
+  const username = typeof body.username === 'string' ? body.username.trim() : '';
+  if (!username) throw missingParameter('username');
+  if (!USERNAME_RE.test(username)) {
+    throw invalidParameter('username must be 3-64 chars of letters, digits, dot, dash or underscore');
+  }
+
+  const email = typeof body.email === 'string' ? body.email.trim() : '';
+  if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    throw invalidParameter(`not an email address: ${email}`);
+  }
+
+  // Temporary by design — Keycloak forces a change at first sign-in, so this value never
+  // becomes the account's real password and does not need to be a good one.
+  const password = typeof body.password === 'string' ? body.password : '';
+  if (password.length < 8) throw invalidParameter('temporary password must be at least 8 characters');
+
+  const str = (v) => (typeof v === 'string' ? v.trim() : '');
+  return {
+    username,
+    email: email || null,
+    firstName: str(body.first_name) || null,
+    lastName: str(body.last_name) || null,
+    password,
+  };
+}
+
 export function validateArtifactMetadata(body) {
   if (!body || typeof body !== 'object') throw missingParameter('body');
 

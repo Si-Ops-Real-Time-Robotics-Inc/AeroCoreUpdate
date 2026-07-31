@@ -11,12 +11,14 @@ import { insertAudit, listAudit } from '../repositories/audit.repository.js';
 import * as systems from '../repositories/system.repository.js';
 import { getKeyId, getPublicKeyBase64, verifyKeyCertificate } from '../services/signing.service.js';
 import { listCerts, putCert } from '../repositories/signingKeyCert.repository.js';
+import { createUser, keycloakAdminConfigured, listUsers }
+  from '../services/keycloakAdmin.service.js';
 import { getTlsInfo } from '../services/tlsInfo.service.js';
 import {
   validateArtifactMetadata, validateChannelBody, validateChannelName, validateExpectedSha256,
-  validateKeyCertificateBody, validatePublishedAt, validateReleaseBody, validateSerial,
-  validateSignatureHeaders, validateSystemBody, validateSystemName, validateUploadQuery,
-  validateVersionParam,
+  validateKeyCertificateBody, validateNewUser, validatePublishedAt, validateReleaseBody,
+  validateSerial, validateSignatureHeaders, validateSystemBody, validateSystemName,
+  validateUploadQuery, validateVersionParam,
 } from '../validators/admin.validator.js';
 
 const intParam = (raw, fallback, max) => {
@@ -424,6 +426,50 @@ export async function putSigningKeyCertificate(req, res) {
 
 export async function tls(req, res) {
   sendJson(res, 200, getTlsInfo());
+}
+
+/**
+ * GET /admin/api/users — accounts in the Keycloak realm.
+ *
+ * Answers with `configured: false` rather than an error when Keycloak is not wired up, so
+ * the admin UI can hide the panel instead of showing a broken one.
+ */
+export async function listUsersHandler(req, res) {
+  if (!keycloakAdminConfigured()) {
+    sendJson(res, 200, { configured: false, users: [] });
+    return;
+  }
+  const users = await listUsers({
+    limit: intParam(req.query.get('limit'), 50, 200),
+    search: req.query.get('search') ?? '',
+  });
+  sendJson(res, 200, { configured: true, users });
+}
+
+/**
+ * POST /admin/api/users — create an account in Keycloak.
+ *
+ * The account is granted NO roles. It can sign in and will see nothing until an admin
+ * assigns one — see keycloakAdmin.service.js for why that is not optional while this
+ * server's authorisation is still binary.
+ */
+export async function createUserHandler(req, res) {
+  const input = validateNewUser(await readJsonBody(req));
+  const created = await createUser(input);
+
+  await insertAudit({
+    actor: req.user.username,
+    action: 'user.create',
+    subject: created.username,
+    // Never the password, not even its length.
+    detail: { id: created.id, email: created.email },
+  });
+
+  sendJson(res, 201, {
+    ...created,
+    note: 'No roles were granted. The account cannot do anything until one is assigned, '
+      + 'and the temporary password must be changed at first sign-in.',
+  });
 }
 
 function serializeArtifact(artifact) {

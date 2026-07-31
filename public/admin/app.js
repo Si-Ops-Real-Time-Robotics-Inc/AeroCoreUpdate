@@ -1499,22 +1499,44 @@ function copyButton(value) {
   return button;
 }
 
+/**
+ * Accounts, when Keycloak is wired up. The panel stays hidden otherwise rather than
+ * showing controls that cannot work — the endpoint says which case it is.
+ */
+function renderUsers(payload) {
+  const card = $('users-card');
+  if (!payload.configured) {
+    card.hidden = true;
+    return;
+  }
+  card.hidden = false;
+  $('users-list').replaceChildren(table(
+    ['Username', 'Email', 'Enabled', 'Created'],
+    payload.users.map((u) => [u.username, u.email ?? '—', u.enabled ? 'yes' : 'no', when(u.created_at)]),
+  ));
+}
+
 function loadSecurity() {
   guard(async () => {
-    const [key, tls, audit, fleet] = await Promise.all([
+    const [key, tls, audit, fleet, users] = await Promise.all([
       request('/admin/api/signing-key'),
       request('/admin/api/tls'),
       request('/admin/api/audit?limit=100'),
       request('/admin/api/api-keys'),
+      request('/admin/api/users'),
     ]);
 
     renderApiKeys(fleet);
+    renderUsers(users);
 
     definitions('signing-key', [
       ['key_id', key.key_id],
       ['Algorithm', key.algorithm],
-      ['Public key (base64)', key.public_key_base64],
-      ['Private key file', key.key_file],
+      // Null once SIGNING_REQUIRE_PRESIGNED is on: the goal state is a server that holds
+      // no private key at all, which is a fact worth stating rather than a blank.
+      ['Public key (base64)', key.public_key_base64 ?? '— (no local key: artifacts are pre-signed)'],
+      ['Holds a private key', key.holds_private_key ? 'yes' : 'no'],
+      ['Private key file', key.key_file ?? '—'],
     ]);
 
     definitions('tls-info', [
@@ -1532,6 +1554,30 @@ function loadSecurity() {
     ));
   });
 }
+
+$('new-user-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  guard(async () => {
+    const created = await request('/admin/api/users', {
+      method: 'POST',
+      body: {
+        username: $('u-name').value.trim(),
+        email: $('u-email').value.trim(),
+        password: $('u-pass').value,
+      },
+    });
+    // Clear the password field first — it is a live credential until it is used once.
+    $('u-pass').value = '';
+    $('u-name').value = '';
+    $('u-email').value = '';
+    // window.alert, as the password form does — this UI has no toast of its own, and the
+    // "no roles yet" part is exactly the thing that must not be missed.
+    window.alert(`Created ${created.username}.\n\n`
+      + 'No roles were granted, so it cannot do anything yet — assign one in Keycloak. '
+      + 'The temporary password must be changed at first sign-in.');
+    loadSecurity();
+  });
+});
 
 $('password-form').addEventListener('submit', (event) => {
   event.preventDefault();

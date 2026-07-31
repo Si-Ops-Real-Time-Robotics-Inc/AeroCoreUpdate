@@ -160,6 +160,26 @@
 
       <!-- Security ------------------------------------------------------------------>
       <section id="tab-security" class="tab" hidden>
+        <div class="card" id="users-card" hidden>
+          <h2>Accounts</h2>
+          <p class="hint">
+            Accounts live in Keycloak, so one created here also signs in to AeroCore and
+            aerotunnel. A new account is created with <strong>no roles</strong> &mdash; it can
+            sign in but can do nothing until one is assigned &mdash; and its temporary
+            password must be changed at first sign-in.
+          </p>
+          <form id="new-user-form" class="grid">
+            <label for="u-name">Username</label>
+            <input id="u-name" type="text" autocomplete="off" required />
+            <label for="u-email">Email (optional)</label>
+            <input id="u-email" type="email" autocomplete="off" />
+            <label for="u-pass">Temporary password</label>
+            <input id="u-pass" type="password" autocomplete="new-password" minlength="8" required />
+            <span></span>
+            <button type="submit">Create account</button>
+          </form>
+          <div id="users-list"></div>
+        </div>
         <div class="card">
           <h2>OTA signing key</h2>
           <p class="hint">Provision this public key into each node's <code>key_id &rarr; key</code> map.</p>

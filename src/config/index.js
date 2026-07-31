@@ -154,6 +154,15 @@ export const config = {
   // line change — and a cutover, so only do it once every node has a token.
   fleetAuthMode: (process.env.FLEET_AUTH_MODE || 'apikey').trim().toLowerCase(),
 
+  // Creating accounts from the admin UI, via Keycloak's admin REST API. The service
+  // account behind these credentials must hold `manage-users` and nothing more — never
+  // `realm-admin`. It lives on this box, so anything it can do, an attacker who takes this
+  // box can do.
+  keycloakBaseUrl: (process.env.KEYCLOAK_BASE_URL || '').trim(),
+  keycloakRealm: (process.env.KEYCLOAK_REALM || '').trim(),
+  keycloakAdminClientId: process.env.KEYCLOAK_ADMIN_CLIENT_ID || '',
+  keycloakAdminClientSecret: process.env.KEYCLOAK_ADMIN_CLIENT_SECRET || '',
+
   // Catalog behaviour
   publicBaseUrl: process.env.PUBLIC_BASE_URL || '',
   strictPlatforms: bool(process.env.STRICT_PLATFORMS, true),

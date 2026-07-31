@@ -51,6 +51,12 @@ export const adminRoutes = new Router()
   .get('/api/systems/:system/channels/:name', requireAuth(admin.getChannel))
   .put('/api/systems/:system/channels/:name', requireAuth(admin.putChannel))
 
+  // Accounts live in Keycloak, so one created here works on AeroCore and aerotunnel too.
+  // Created with NO roles: this server's authorisation is still binary, so a usable
+  // account would be an omnipotent one.
+  .get('/api/users', requireAuth(admin.listUsersHandler))
+  .post('/api/users', requireAuth(admin.createUserHandler))
+
   .get('/api/fleet', requireAuth(admin.fleet))
   .get('/api/reports', requireAuth(admin.reports))
   .get('/api/audit', requireAuth(admin.audit))
