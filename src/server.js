@@ -74,8 +74,13 @@ async function main() {
 function assertRequiredSecrets() {
   const missing = [];
   if (!config.databaseUrl) missing.push('DATABASE_URL');
+  // Still required with Keycloak in play: it signs the LOCAL admin session, which is the
+  // break-glass route this server keeps for when the IdP is down.
   if (!config.jwtSecret) missing.push('JWT_SECRET');
-  if (!config.apiKeys.size) missing.push('UPDATE_API_KEYS');
+  // Only when the fleet still authenticates with it. Under FLEET_AUTH_MODE=jwt nothing ever
+  // reads the key, so demanding one would be asking for a secret to satisfy a check rather
+  // than a purpose — and an unused secret is one more thing to leak.
+  if (config.fleetAuthMode !== 'jwt' && !config.apiKeys.size) missing.push('UPDATE_API_KEYS');
 
   if (!missing.length) return;
 
