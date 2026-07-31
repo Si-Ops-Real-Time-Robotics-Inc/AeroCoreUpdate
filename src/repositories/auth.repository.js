@@ -23,6 +23,30 @@ export async function countUsers() {
   return rows[0].n;
 }
 
+/**
+ * The local row standing in for an externally-authenticated user, created on first sign-in.
+ *
+ * Everything here refers to an admin by the integer `admin_user.id` — refresh_token.user_id,
+ * audit actors, artifact uploaded_by. Keycloak's `sub` is a UUID, so rather than rewrite all
+ * of that, an external identity gets a local row keyed to its subject.
+ *
+ * The password hash is a sentinel no scrypt comparison can match. Such an account must not be
+ * able to sign in with a password, and a hash that cannot verify is a stronger guarantee than
+ * a flag some future code path might forget to check.
+ */
+export async function upsertExternalUser({ issuer, subject, username }) {
+  const { rows } = await query(
+    `INSERT INTO admin_user (username, password_hash, external_id, external_issuer)
+     VALUES ($1, 'external:no-password', $2, $3)
+     ON CONFLICT (external_issuer, external_id) WHERE external_id IS NOT NULL
+       DO UPDATE SET username = EXCLUDED.username, last_login_at = now()
+     RETURNING id, username, password_hash, disabled, created_at, last_login_at,
+               password_changed_at`,
+    [username, subject, issuer],
+  );
+  return mapUser(rows[0]);
+}
+
 export async function createUser(username, passwordHash) {
   const { rows } = await query(
     'INSERT INTO admin_user (username, password_hash) VALUES ($1, $2) RETURNING id',

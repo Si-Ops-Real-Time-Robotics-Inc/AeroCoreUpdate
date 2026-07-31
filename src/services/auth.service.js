@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { config } from '../config/index.js';
 import { logger } from '../core/logger.js';
 import * as jwt from '../core/jwt.js';
+import { oidcConfigured, verifyExternal } from '../core/oidc.js';
 import { DUMMY_HASH, hash, randomPassword, verify as verifyPassword } from '../core/password.js';
 import { forbidden, rateLimited, unauthorized } from '../core/errors.js';
 import * as repository from '../repositories/auth.repository.js';
@@ -122,8 +123,60 @@ export async function changePassword({ user, currentPassword, newPassword, keepJ
   return revoked;
 }
 
+/** Cheap shape test: does this token claim to be EdDSA-signed? Used only to decide whether a
+ *  verification failure is worth reporting or worth falling through on. */
+function looksExternal(token) {
+  try {
+    const [rawHeader] = String(token).split('.');
+    return JSON.parse(Buffer.from(rawHeader, 'base64url').toString('utf8')).alg === 'EdDSA';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Authenticate a Keycloak token, mapping it onto a local admin row.
+ *
+ * Tried before the local path, and the two cannot be confused: this one demands EdDSA and
+ * the configured issuer, while a locally-minted token is HS256 with `iss: aeroserver`, so
+ * each is rejected outright by the other's verifier. That is what keeps the documented
+ * fleet/admin credential isolation intact with both paths live.
+ *
+ * @returns the user row, or null when this is not an external token at all — so the caller
+ *          falls back rather than treating it as a failure.
+ */
+async function authenticateExternal(accessToken) {
+  if (!oidcConfigured()) return null;
+
+  let claims;
+  try {
+    claims = await verifyExternal(accessToken, { audience: config.oidcAudienceAdmin });
+  } catch (err) {
+    // A token that IS from this issuer but is bad — expired, wrong audience, tampered —
+    // fails here rather than falling through to be re-judged as a local token, which would
+    // report a thoroughly misleading reason.
+    if (looksExternal(accessToken)) throw unauthorized(err.message);
+    return null;
+  }
+
+  const user = await repository.upsertExternalUser({
+    issuer: claims.iss,
+    subject: claims.sub,
+    username: claims.preferred_username || claims.sub,
+  });
+  if (user.disabled) throw forbidden('Account is disabled');
+  // The upsert just re-read the row, so any cached copy of it is now the stale one.
+  clearUserCache();
+  return user;
+}
+
 /** Verify an access token and re-check the account, so a disabled user loses access at once. */
 export async function authenticate(accessToken) {
+  // Keycloak first; the local password path stays as the break-glass route, because an IdP
+  // outage during a bad rollout is exactly when someone needs to reach this server.
+  const external = await authenticateExternal(accessToken);
+  if (external) return external;
+
   let claims;
   try {
     claims = jwt.verify(accessToken, config.jwtSecret);
