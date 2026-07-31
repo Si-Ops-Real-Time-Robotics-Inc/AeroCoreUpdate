@@ -76,6 +76,26 @@ function parsePublicKeys(raw) {
   return keys;
 }
 
+/* ── Keycloak, derived from two settings ───────────────────────────────────────────────────
+ *
+ * Keycloak's URL layout is fixed, so the issuer and the JWKS endpoint follow from the base
+ * URL and the realm. Asking for all four would be the same two facts written twice, and the
+ * copy that drifts is the one that breaks — with a symptom ("wrong issuer") that looks
+ * nothing like its cause.
+ *
+ * The overrides exist for one real case: behind a reverse proxy, the `iss` a token carries is
+ * the PUBLIC URL while this server dials Keycloak on an internal address. Then the two
+ * genuinely differ and must be stated separately.
+ */
+const KEYCLOAK_BASE = (process.env.KEYCLOAK_BASE_URL || '').trim().replace(/\/+$/, '');
+const KEYCLOAK_REALM = (process.env.KEYCLOAK_REALM || '').trim();
+const DERIVED_ISSUER = KEYCLOAK_BASE && KEYCLOAK_REALM
+  ? `${KEYCLOAK_BASE}/realms/${KEYCLOAK_REALM}`
+  : '';
+const OIDC_ISSUER = (process.env.OIDC_ISSUER || '').trim() || DERIVED_ISSUER;
+const OIDC_JWKS_URI = (process.env.OIDC_JWKS_URI || '').trim()
+  || (DERIVED_ISSUER ? `${DERIVED_ISSUER}/protocol/openid-connect/certs` : '');
+
 /** Every env-derived setting lives here, so nothing else reads process.env. */
 export const config = {
   env: process.env.NODE_ENV || 'development',
@@ -137,10 +157,16 @@ export const config = {
 
   // External identity (Keycloak). One account across AeroServer, AeroCore and aerotunnel.
   //
+  // ONE realm, named ONCE: base URL + realm. The issuer and the JWKS URI are derived from
+  // them below, because Keycloak's own layout fixes both — naming all four would be the
+  // same two facts written twice, and the pair that drifts is the pair that breaks.
+  //
   // EdDSA only — see core/oidc.js. A Keycloak realm ships RSA keys by default, so an EdDSA
   // realm key has to be added and selected, or nothing here will verify anything.
-  oidcIssuer: process.env.OIDC_ISSUER || '',
-  oidcJwksUri: process.env.OIDC_JWKS_URI || '',
+  keycloakBaseUrl: KEYCLOAK_BASE,
+  keycloakRealm: KEYCLOAK_REALM,
+  oidcIssuer: OIDC_ISSUER,
+  oidcJwksUri: OIDC_JWKS_URI,
   // Audiences are checked per surface and are deliberately different: a token minted for the
   // fleet API must not open the admin API, nor the reverse.
   oidcAudienceAdmin: process.env.OIDC_AUDIENCE_ADMIN || 'aeroserver-admin',
@@ -158,8 +184,6 @@ export const config = {
   // account behind these credentials must hold `manage-users` and nothing more — never
   // `realm-admin`. It lives on this box, so anything it can do, an attacker who takes this
   // box can do.
-  keycloakBaseUrl: (process.env.KEYCLOAK_BASE_URL || '').trim(),
-  keycloakRealm: (process.env.KEYCLOAK_REALM || '').trim(),
   keycloakAdminClientId: process.env.KEYCLOAK_ADMIN_CLIENT_ID || '',
   keycloakAdminClientSecret: process.env.KEYCLOAK_ADMIN_CLIENT_SECRET || '',
   // Realm role granted to an account created here. `customer` on purpose: the LOWEST
