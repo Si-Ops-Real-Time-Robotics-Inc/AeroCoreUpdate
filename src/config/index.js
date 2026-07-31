@@ -162,6 +162,9 @@ export const config = {
   keycloakRealm: (process.env.KEYCLOAK_REALM || '').trim(),
   keycloakAdminClientId: process.env.KEYCLOAK_ADMIN_CLIENT_ID || '',
   keycloakAdminClientSecret: process.env.KEYCLOAK_ADMIN_CLIENT_SECRET || '',
+  // Realm role granted to an account created here. `customer` on purpose: the LOWEST
+  // privilege level, never a convenient one. Set it empty to grant nothing at all.
+  keycloakDefaultRole: (process.env.KEYCLOAK_DEFAULT_ROLE ?? 'customer').trim(),
 
   // Catalog behaviour
   publicBaseUrl: process.env.PUBLIC_BASE_URL || '',

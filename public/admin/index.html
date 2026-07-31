@@ -164,9 +164,9 @@
           <h2>Accounts</h2>
           <p class="hint">
             Accounts live in Keycloak, so one created here also signs in to AeroCore and
-            aerotunnel. A new account is created with <strong>no roles</strong> &mdash; it can
-            sign in but can do nothing until one is assigned &mdash; and its temporary
-            password must be changed at first sign-in.
+            aerotunnel. A new account gets the <strong>customer</strong> role &mdash; the
+            lowest privilege level &mdash; and its temporary password must be changed at
+            first sign-in. Anything beyond that is granted in Keycloak, deliberately.
           </p>
           <form id="new-user-form" class="grid">
             <label for="u-name">Username</label>

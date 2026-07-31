@@ -69,13 +69,42 @@ async function adminCall(path, init = {}) {
 }
 
 /**
- * Create a user with a temporary password.
+ * Grant a realm role to a freshly created user.
  *
- * NO ROLES are granted. The account can sign in and will see nothing until an admin gives
- * it one, and that is deliberate: this server's authorisation is still binary, so every
- * valid token is currently omnipotent — including for the route that points `stable` at a
- * release and thus ships firmware to the whole fleet. "Created and immediately usable"
- * would mean "anyone who can be created can ship firmware".
+ * Best effort by design: the account already exists by this point, and failing the whole
+ * request would leave an account created but reported as an error — the worst of both. The
+ * caller is told whether it worked so the operator can fix it rather than assume.
+ *
+ * Needs `view-realm` on the service account to look the role up, on top of `manage-users`.
+ */
+async function assignRealmRole(userId, roleName) {
+  const lookup = await adminCall(`/roles/${encodeURIComponent(roleName)}`);
+  if (!lookup.ok) {
+    throw new Error(`realm role "${roleName}" does not exist (HTTP ${lookup.status}) — `
+      + 'create it in Keycloak, or set KEYCLOAK_DEFAULT_ROLE to one that does');
+  }
+  const role = await lookup.json();
+
+  const res = await adminCall(`/users/${userId}/role-mappings/realm`, {
+    method: 'POST',
+    body: JSON.stringify([{ id: role.id, name: role.name }]),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(`could not grant "${roleName}" (HTTP ${res.status})`
+      + (detail ? `: ${detail.slice(0, 200)}` : ''));
+  }
+}
+
+/**
+ * Create a user with a temporary password and the default role.
+ *
+ * The default is `customer` — deliberately the LOWEST-privilege role, not a convenient one.
+ * This server's authorisation is still binary (every valid token opens every admin route,
+ * including the one that points `stable` at a release and thereby ships firmware to the
+ * whole fleet), so what stops a newly created account from being able to do that is the
+ * role model in Keycloak, not anything here. Until requireScope lands, treat `customer` as
+ * "can sign in, and is not to be given an admin session".
  */
 export async function createUser({ username, email, firstName, lastName, password }) {
   if (!keycloakAdminConfigured()) {
@@ -105,7 +134,22 @@ export async function createUser({ username, email, firstName, lastName, passwor
   // 201 carries the new id only in Location; the body is empty.
   const id = (res.headers.get('location') ?? '').split('/').filter(Boolean).pop() ?? null;
   logger.info(`Created Keycloak user ${username} (${id})`);
-  return { id, username, email: email ?? null, temporaryPassword: true };
+
+  let role = config.keycloakDefaultRole;
+  let roleError = null;
+  if (role && id) {
+    try {
+      await assignRealmRole(id, role);
+    } catch (err) {
+      // Reported, not thrown: the account exists either way, and an operator needs to know
+      // it is sitting there without the role rather than believe nothing happened.
+      roleError = err.message;
+      role = null;
+      logger.warn(`Created ${username} but could not grant the default role: ${err.message}`);
+    }
+  }
+
+  return { id, username, email: email ?? null, temporaryPassword: true, role, roleError };
 }
 
 export async function listUsers({ limit = 50, search = '' } = {}) {

@@ -462,13 +462,17 @@ export async function createUserHandler(req, res) {
     action: 'user.create',
     subject: created.username,
     // Never the password, not even its length.
-    detail: { id: created.id, email: created.email },
+    detail: { id: created.id, email: created.email, role: created.role },
   });
 
   sendJson(res, 201, {
     ...created,
-    note: 'No roles were granted. The account cannot do anything until one is assigned, '
-      + 'and the temporary password must be changed at first sign-in.',
+    note: created.role
+      ? `Granted the "${created.role}" role. The temporary password must be changed at `
+        + 'first sign-in.'
+      : 'No role was granted' + (created.roleError ? ` (${created.roleError})` : '')
+        + '. The account can sign in but should not be given an admin session until one '
+        + 'is assigned.',
   });
 }
 

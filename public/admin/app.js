@@ -1572,9 +1572,7 @@ $('new-user-form').addEventListener('submit', (event) => {
     $('u-email').value = '';
     // window.alert, as the password form does — this UI has no toast of its own, and the
     // "no roles yet" part is exactly the thing that must not be missed.
-    window.alert(`Created ${created.username}.\n\n`
-      + 'No roles were granted, so it cannot do anything yet — assign one in Keycloak. '
-      + 'The temporary password must be changed at first sign-in.');
+    window.alert(`Created ${created.username}.\n\n${created.note}`);
     loadSecurity();
   });
 });
