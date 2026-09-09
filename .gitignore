@@ -8,3 +8,7 @@ coverage/
 artifacts/
 keys/
 tls/
+
+# The vendored UI/UX skill is Python, and running its search tool leaves bytecode behind.
+__pycache__/
+*.pyc
