@@ -22,14 +22,14 @@ describe('ALLOW_PLAINTEXT_HTTP', { skip: hasDatabase ? false : SKIP_MESSAGE }, (
     assert.equal(res.json().ok, true);
 
     const check = await server.plainRequest(
-      '/api/v1/update/check?serial=S&platform=linux-x86_64&version=0.1.0',
+      '/api/v1/update/check?system=default&serial=S&platform=linux-x86_64&version=0.1.0',
       { headers: fleetHeaders() },
     );
     assert.equal(check.status, 200);
   });
 
   test('the admin surface refuses plaintext with 426', async () => {
-    for (const pathname of ['/admin/api/catalog', '/admin/api/auth/login', '/admin/']) {
+    for (const pathname of ['/admin/api/catalog', '/admin/api/auth/me', '/admin/']) {
       const res = await server.plainRequest(pathname, { method: 'GET' });
       assert.equal(res.status, 426, pathname);
       assert.match(res.headers.upgrade, /TLS/);

@@ -16,11 +16,9 @@ import {
  * The single-system case, which is what every existing installation is and what the migration
  * leaves behind.
  *
- * A device flashed at the factory reports a version this server never published, so on a new
- * fleet the version lookup places nobody. Parking all of them for review is the right answer
- * only when there is something to confuse them with — with one system there is no wrong
- * answer, and making an operator confirm the same decision once per device would be the
- * feature making things worse.
+ * A bundle that names no system goes to the only one there is. A node always names its own —
+ * the check requires it — so a device flashed at the factory, on a version this server never
+ * published, is placed by what it says and never waits for review, however many systems exist.
  */
 describe('one system leaves nothing to disambiguate',
   { skip: hasDatabase ? false : SKIP_MESSAGE }, () => {
@@ -52,7 +50,7 @@ describe('one system leaves nothing to disambiguate',
 
     test('a factory-fresh node on an unpublished version is still served', async () => {
       const res = await server.request(
-        '/api/v1/update/check?serial=SN-NEW&platform=linux-x86_64&version=0.1.0&channel=stable',
+        '/api/v1/update/check?system=default&serial=SN-NEW&platform=linux-x86_64&version=0.1.0&channel=stable',
         { headers: fleetHeaders() },
       );
 
@@ -63,21 +61,23 @@ describe('one system leaves nothing to disambiguate',
 
     test('and it is not added to the review queue', async () => {
       const { nodes } = (await session.api('/admin/api/unclassified')).json();
-      assert.deepEqual(nodes, [], 'nothing to review while one system exists');
+      assert.deepEqual(nodes, [], 'it said what it is, so there is nothing to review');
     });
 
-    test('creating a second system is what starts the review queue', async () => {
+    test('a second system changes nothing for a node that says which it is', async () => {
+      // This used to start the review queue: with two systems, a version nobody published could
+      // belong to either. The node's own claim settles it, so there is nothing to review.
       await session.api('/admin/api/systems', {
         method: 'POST', body: JSON.stringify({ name: 'gcs' }),
       });
 
       const res = await server.request(
-        '/api/v1/update/check?serial=SN-NEW2&platform=linux-x86_64&version=0.1.0&channel=stable',
+        '/api/v1/update/check?system=default&serial=SN-NEW2&platform=linux-x86_64&version=0.1.0&channel=stable',
         { headers: fleetHeaders() },
       );
-      assert.equal(res.json().update_available, false, 'now there is something to confuse it with');
+      assert.equal(res.json().version, '2.0.0');
 
       const { nodes } = (await session.api('/admin/api/unclassified?filter=pending')).json();
-      assert.ok(nodes.some((node) => node.serial === 'SN-NEW2'));
+      assert.deepEqual(nodes, []);
     });
   });

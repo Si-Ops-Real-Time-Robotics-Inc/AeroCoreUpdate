@@ -1,8 +1,14 @@
 node_modules/
 .env
+# Every variant too: a stale .env.bak carries the same secrets and is the one
+# `git add -A` would sweep up, because only the exact name was listed before.
+.env.*
+!.env.example
+*.bak
 *.log
 .DS_Store
 coverage/
+.vitest/
 
 # Runtime state that must never be committed
 artifacts/
@@ -12,3 +18,9 @@ tls/
 # The vendored UI/UX skill is Python, and running its search tool leaves bytecode behind.
 __pycache__/
 *.pyc
+
+# Build output of webui/, merged into public/admin only inside the image.
+public/.admin-build/
+
+# TypeScript incremental build cache.
+*.tsbuildinfo

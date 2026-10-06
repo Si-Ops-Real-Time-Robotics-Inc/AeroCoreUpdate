@@ -58,7 +58,7 @@ describe('GET /api/v1/update/download/{version}', { skip: hasDatabase ? false : 
 
   test('the served bytes hash to the sha256 the check response signed', async () => {
     const manifest = (await get(
-      '/api/v1/update/check?serial=SN-1&platform=linux-x86_64&version=0.13.0',
+      '/api/v1/update/check?system=default&serial=SN-1&platform=linux-x86_64&version=0.13.0',
     )).json();
 
     const body = await get(SLIM_URL);
@@ -185,7 +185,7 @@ describe('GET /api/v1/update/download/{version}', { skip: hasDatabase ? false : 
     ]) {
       const res = await get(attempt);
       assert.ok([400, 404].includes(res.status), `${attempt} -> ${res.status}`);
-      assert.ok(!res.text().includes('"name": "aeroserver"'), 'must never serve a repo file');
+      assert.ok(!res.text().includes('"name": "aerocoreupdate"'), 'must never serve a repo file');
     }
   });
 

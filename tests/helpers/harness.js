@@ -36,7 +36,7 @@ export const ADMIN_PASSWORD = 'test-admin-password-123';
  * `node --test` already gives every file its own process.
  */
 export async function startServer({ env = {} } = {}) {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'aeroserver-test-'));
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'aerocoreupdate-test-'));
   const schema = `test_${crypto.randomBytes(6).toString('hex')}`;
   const tls = await selfSigned(dir);
 
@@ -71,6 +71,11 @@ export async function startServer({ env = {} } = {}) {
     ALLOW_PLAINTEXT_HTTP: '0',
     OIDC_ISSUER: idp.issuer,
     OIDC_JWKS_URI: idp.jwksUri,
+    // The address the SERVER dials, as opposed to the issuer a token claims. Identical here,
+    // but they are separate settings because a split-horizon deployment makes them differ —
+    // and the browser sign-in reads this one to find the token endpoint.
+    KEYCLOAK_BASE_URL: idp.base,
+    KEYCLOAK_REALM: idp.realm,
     OIDC_AUDIENCE_ADMIN: OIDC_AUDIENCE_ADMIN,
     OIDC_AUDIENCE_FLEET: OIDC_AUDIENCE_FLEET,
     OIDC_JWKS_CACHE_FILE: path.join(dir, 'jwks-cache.json'),
@@ -86,9 +91,6 @@ export async function startServer({ env = {} } = {}) {
 
   const { migrate } = await import('../../src/db/migrate.js');
   await migrate();
-
-  const { bootstrapAdmin } = await import('../../src/services/auth.service.js');
-  await bootstrapAdmin();
 
   const { initSigning, getPublicKeyBase64 } = await import('../../src/services/signing.service.js');
   await initSigning();
@@ -149,6 +151,13 @@ export async function startServer({ env = {} } = {}) {
     /** Mint a token the way the stand-in IdP would. Defaults produce a valid fleet token. */
     token: (overrides = {}) => idp.mint(overrides),
 
+    /** The stand-in IdP, for suites that drive the browser sign-in flow. */
+    idp: {
+      setTokenHandler: idp.setTokenHandler,
+      setWellKnownStatus: idp.setWellKnownStatus,
+      issuer: idp.issuer,
+    },
+
     /** Headers for a bearer-authenticated fleet request, mirroring fleetHeaders(). */
     bearerHeaders: (overrides = {}, extra = {}) => ({
       Authorization: `Bearer ${idp.mint(overrides)}`,
@@ -168,6 +177,8 @@ export async function startServer({ env = {} } = {}) {
 
 export const OIDC_AUDIENCE_ADMIN = 'aeroserver-admin';
 export const OIDC_AUDIENCE_FLEET = 'aerocore';
+/** The realm role authenticateExternal demands before any admin route opens. */
+export const OIDC_ADMIN_ROLE = 'aeroserver-admin';
 
 const b64u = (input) => Buffer.from(input).toString('base64url');
 
@@ -186,14 +197,67 @@ async function startFakeIdp() {
   // A second key the server is never told about, for the unknown-kid case.
   const strangerKey = crypto.generateKeyPairSync('ed25519').privateKey;
 
+  /**
+   * What the token endpoint answers. Replaceable, because the browser sign-in has to be
+   * testable when Keycloak refuses as well as when it agrees — a rejected refresh is the
+   * ordinary end of a session, not an edge case.
+   */
+  let tokenHandler = (params) => [200, {
+    access_token: mint({ aud: OIDC_AUDIENCE_ADMIN, roles: [OIDC_ADMIN_ROLE] }),
+    // Rotated the way Keycloak rotates it, so a test can catch a cookie that was not updated.
+    refresh_token: `refresh-after-${params.grant_type}`,
+    expires_in: 300,
+    token_type: 'Bearer',
+  }];
+
+  const json = (res, status, body) => {
+    const payload = JSON.stringify(body);
+    res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': payload.length });
+    res.end(payload);
+  };
+
+  // What the server probes to decide whether Keycloak is answering at all. The status is
+  // settable so a suite can take the IdP "down" without stopping it.
+  let wellKnownStatus = 200;
+
   const server = http.createServer((req, res) => {
-    if (!req.url.startsWith('/jwks')) {
-      res.writeHead(404).end();
+    if (req.url.startsWith('/jwks')) {
+      json(res, 200, { keys: [jwk] });
       return;
     }
-    const body = JSON.stringify({ keys: [jwk] });
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': body.length });
-    res.end(body);
+
+    if (req.url.endsWith('/.well-known/openid-configuration')) {
+      if (wellKnownStatus !== 200) {
+        res.writeHead(wellKnownStatus).end();
+        return;
+      }
+      json(res, 200, {
+        issuer,
+        jwks_uri: `http://127.0.0.1:${port}/jwks`,
+        token_endpoint: `${issuer}/protocol/openid-connect/token`,
+      });
+      return;
+    }
+
+    // The two endpoints the server itself calls: it dials Keycloak's real URL layout, so the
+    // stand-in has to answer at the same paths.
+    if (req.url.endsWith('/protocol/openid-connect/token')
+        || req.url.endsWith('/protocol/openid-connect/logout')) {
+      const chunks = [];
+      req.on('data', (chunk) => chunks.push(chunk));
+      req.on('end', () => {
+        if (req.url.endsWith('/logout')) {
+          res.writeHead(204).end();
+          return;
+        }
+        const params = Object.fromEntries(new URLSearchParams(Buffer.concat(chunks).toString()));
+        const [status, body] = tokenHandler(params);
+        json(res, status, body);
+      });
+      return;
+    }
+
+    res.writeHead(404).end();
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = server.address().port;
@@ -207,13 +271,23 @@ async function startFakeIdp() {
     sub = 'a3f1c2d4-0000-4000-8000-000000000001',
     username = 'testuser',
     expiresIn = 300,
+    // How long ago the token was minted. Zero is the ordinary case; a test that needs a token
+    // demonstrably OLDER than something that happened a moment ago sets it, because `iat` has
+    // one-second resolution and "just now" is not reliably before "just now".
+    issuedAgo = 0,
     notBefore = null,
     signWith = privateKey,
     stranger = false,
+    roles = [],
   } = {}) {
     const now = Math.floor(Date.now() / 1000);
-    const claims = { iss, aud, sub, preferred_username: username, iat: now, exp: now + expiresIn };
+    const claims = {
+      iss, aud, sub, preferred_username: username, iat: now - issuedAgo, exp: now + expiresIn,
+    };
     if (notBefore !== null) claims.nbf = now + notBefore;
+    // Empty by default so a test has to ASK for authorisation. Keycloak emits realm roles
+    // here, and a token carrying none is the ordinary `customer` case.
+    if (roles.length) claims.realm_access = { roles };
 
     const head = `${b64u(JSON.stringify({ alg, typ: 'JWT', kid: overrideKid }))}`
       + `.${b64u(JSON.stringify(claims))}`;
@@ -225,7 +299,12 @@ async function startFakeIdp() {
 
   return {
     issuer,
+    // What KEYCLOAK_BASE_URL and KEYCLOAK_REALM would name; the issuer is built from the two.
+    base: `http://127.0.0.1:${port}`,
+    realm: 'test',
     jwksUri: `http://127.0.0.1:${port}/jwks`,
+    setTokenHandler: (fn) => { tokenHandler = fn; },
+    setWellKnownStatus: (code) => { wellKnownStatus = code; },
     mint,
     close: () => new Promise((resolve) => server.close(resolve)),
   };
@@ -259,30 +338,42 @@ function doRequest(mod, target, { method = 'GET', headers = {}, body } = {}) {
 }
 
 /** Sign in and return helpers carrying the access token and the refresh cookie. */
-export async function signIn(server, username = ADMIN_USER, password = ADMIN_PASSWORD) {
-  const res = await server.request('/admin/api/auth/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'fetch' },
-    body: JSON.stringify({ username, password }),
+/**
+ * An authenticated admin session.
+ *
+ * Since feature 002 there is no local password to present, so this mints a token
+ * from the stand-in identity provider instead — the same shape Keycloak issues:
+ * EdDSA, the admin audience, and a realm role that maps to every scope.
+ *
+ * `cookie` and `setCookieRaw` are kept as empty values rather than removed, so
+ * the eighteen suites that destructure this object keep working. Nothing reads
+ * them any more: the session cookie only ever bought an access token, and here
+ * the token is minted directly.
+ */
+export async function signIn(server, username = ADMIN_USER, roles = [OIDC_ADMIN_ROLE]) {
+  const token = server.token({
+    aud: OIDC_AUDIENCE_ADMIN,
+    roles,
+    // `username`, not `preferred_username`: mint() builds the claim from this option name.
+    // Passing the claim name instead is silently ignored, which leaves every session token
+    // carrying mint's default username under this test's subject — two subjects claiming one
+    // username, which admin_user_username_key refuses.
+    username,
+    sub: `test-${username}`,
   });
-  if (res.status !== 200) throw new Error(`login failed: ${res.status} ${res.text()}`);
-
-  const cookie = res.setCookie.map((value) => value.split(';')[0]).join('; ');
-  const parsed = res.json();
 
   const api = (pathname, init = {}) => server.request(pathname, {
     ...init,
     headers: {
-      Authorization: `Bearer ${parsed.access_token}`,
+      Authorization: `Bearer ${token}`,
       'X-Requested-With': 'fetch',
-      Cookie: cookie,
       ...(init.body !== undefined && !init.headers?.['Content-Type']
         ? { 'Content-Type': 'application/json' } : {}),
       ...init.headers,
     },
   });
 
-  return { token: parsed.access_token, cookie, setCookieRaw: res.setCookie, user: parsed.user, api };
+  return { token, cookie: '', setCookieRaw: [], user: { username }, api };
 }
 
 export function fleetHeaders(extra = {}) {
@@ -346,14 +437,14 @@ export async function publish(session, {
     if (res.status !== 201) throw new Error(`create system failed: ${res.status} ${res.text()}`);
   }
 
-  // The upload auto-creates a release, but tests usually want the metadata set too. The
-  // system must match what the bundle declares: publish refuses to attach an artifact to a
-  // release of another system, because a version number identifies exactly one version line.
-  if (!catalog.releases.some((release) => release.version === version)) {
-    const res = await session.api('/admin/api/releases', {
+  // The upload auto-creates a release, but tests usually want the metadata set too. A release
+  // is (system, version), so it lives under its system — the same number may exist in another.
+  const target = system ?? 'default';
+  if (!catalog.releases.some((release) => release.system === target && release.version === version)) {
+    const res = await session.api(`/admin/api/systems/${target}/releases`, {
       method: 'POST',
       body: JSON.stringify({
-        version, system, min_version: minVersion, notes, mandatory, published_at: publishedAt,
+        version, min_version: minVersion, notes, mandatory, published_at: publishedAt,
       }),
     });
     if (res.status !== 201) throw new Error(`create release failed: ${res.status} ${res.text()}`);
@@ -362,7 +453,7 @@ export async function publish(session, {
   const query = extraQuery ?? (kind === 'fleet' && covered.length === 1 ? 'kind=fleet' : '');
 
   const res = await session.api(
-    `/admin/api/releases/${version}/artifacts${query ? `?${query}` : ''}`,
+    `/admin/api/systems/${target}/releases/${version}/artifacts${query ? `?${query}` : ''}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/gzip', 'X-Expected-Sha256': sha256Hex(payload) },

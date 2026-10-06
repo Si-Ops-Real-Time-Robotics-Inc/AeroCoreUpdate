@@ -1,4 +1,4 @@
-node_modules/
+**/node_modules/
 .git/
 tests/
 artifacts/
@@ -8,3 +8,11 @@ docs/
 .env
 *.log
 coverage/
+webui/dist/
+# The UI test suite never runs inside the image; the build stage only builds.
+webui/tests/
+webui/vitest.config.ts
+
+# webui build output. The image builds its own in a stage; a local one copied in by
+# COPY public would ship a stale admin UI at an odd URL.
+public/.admin-build/

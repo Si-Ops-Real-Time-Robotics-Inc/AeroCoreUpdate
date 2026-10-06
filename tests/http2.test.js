@@ -73,7 +73,7 @@ describe('HTTP/2', { skip: hasDatabase ? false : SKIP_MESSAGE }, () => {
   test('the request URL survives the h2 header mapping', async () => {
     // HTTP/2 has no `host` header — the authority lives in `:authority`, and a server reading
     // the wrong one builds a broken URL on exactly half its connections.
-    const res = await h2('/api/v1/update/check?serial=SN-H2&platform=plan9-vax&version=1.0.0', {
+    const res = await h2('/api/v1/update/check?system=default&serial=SN-H2&platform=plan9-vax&version=1.0.0', {
       'x-api-key': 'test-fleet-key-0123456789',
     });
 

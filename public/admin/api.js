@@ -78,15 +78,53 @@ export async function request(pathname, { method = 'GET', body, retry = true } =
   return res.status === 204 ? null : res.json();
 }
 
-export async function login(username, password) {
-  const res = await fetch('/admin/api/auth/login', {
+
+/**
+ * Whether this server accepts sign-ups. Answered before anyone has a credential, so the page
+ * can draw the form or leave it out rather than offering one that always fails.
+ *
+ * Any failure reads as "no": a sign-up form that cannot work is worse than none.
+ */
+export async function registrationEnabled() {
+  try {
+    const res = await fetch('/admin/api/auth/registration');
+    if (!res.ok) return false;
+    return Boolean((await res.json()).enabled);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether this server has a Keycloak client configured for the browser sign-in, and whether
+ * Keycloak is answering right now.
+ *
+ * The second half is what the page needs before redirecting anyone automatically: sending an
+ * operator to an identity provider that is down strands them on a dead address, and this
+ * server has no other way in to offer.
+ *
+ * Any failure reads as "neither", for the same reason the registration probe does: a sign-in
+ * route that cannot work is worse than none.
+ */
+export async function keycloakLogin() {
+  try {
+    const res = await fetch('/admin/api/auth/oidc');
+    if (!res.ok) return { enabled: false, reachable: false };
+    const body = await res.json();
+    return { enabled: Boolean(body.enabled), reachable: Boolean(body.reachable) };
+  } catch {
+    return { enabled: false, reachable: false };
+  }
+}
+
+export async function register({ username, email, password }) {
+  const res = await fetch('/admin/api/auth/register', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'fetch' },
-    body: JSON.stringify({ username, password }),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, email: email || undefined, password }),
   });
   if (!res.ok) throw await toError(res);
-  setSession(await res.json());
-  return currentUser;
+  return res.json();
 }
 
 export async function logout() {

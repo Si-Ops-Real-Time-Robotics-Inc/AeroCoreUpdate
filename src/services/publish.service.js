@@ -7,10 +7,11 @@ import { fileSha256, receiveToTempFile } from '../core/files.js';
 import { conflict, invalidBundle, invalidParameter, notFound } from '../core/errors.js';
 import { withTransaction } from '../db/pool.js';
 
-// Postgres unique_violation. Raised by artifact_fleet_uniq and by the (version, kind,
+// Postgres unique_violation. Raised by artifact_fleet_uniq and by the (system, version, kind,
 // platform) constraint when two uploads race past the advisory check above.
 const UNIQUE_VIOLATION = '23505';
 import { parseVersion } from '../domain/version.js';
+import { rollbackFinding } from '../domain/channel.js';
 import { resolveKind } from '../domain/bundle.js';
 import { canonicalTarget } from '../domain/platform.js';
 import { verifyWithPublicKey } from './signing.service.js';
@@ -32,7 +33,7 @@ const TEMP_DIR = () => path.join(config.paths.artifacts, '.tmp');
  * and invisible until someone notices nothing changed.
  *
  * Three properties this has to keep:
- *   - the bytes land in a temp file and are renamed into place, so artifacts/<version>/ never
+ *   - the bytes land in a temp file and are renamed into place, so artifacts/<system>/<version>/ never
  *     holds a half-written file a node could download;
  *   - sha256 is computed while streaming, so a 24 MB bundle is never read twice over the wire;
  *   - the database rows and the file commit together.
@@ -47,7 +48,7 @@ const TEMP_DIR = () => path.join(config.paths.artifacts, '.tmp');
  *
  * Reads nothing but the file and the database. Writes nothing.
  */
-async function examine(received, { version, platforms, kind, expectedSha256 }) {
+async function examine(received, { version, system, platforms, kind, expectedSha256 }) {
   if (received.size === 0) throw invalidParameter('Upload was empty');
 
   // Before inspection: a corrupted transfer must not be reported as a bundle-format fault.
@@ -69,10 +70,21 @@ async function examine(received, { version, platforms, kind, expectedSha256 }) {
   // Which kind of device this is for. An admin creates systems explicitly, so an unknown
   // name is refused rather than invented: a typo would silently start a release line of its
   // own that no node ever joins, and the mistake would only surface as "nobody updated".
-  // A bundle that names nothing goes to the only system there is, and failing that to
-  // DEFAULT_SYSTEM. The sole-system rule matches how the check path places a node it cannot
-  // identify: with one system there is no ambiguity to resolve, so nobody is asked to.
+  //
+  // The bundle is the source of truth, as it is for the version. A system asserted in the URL
+  // (/systems/:system/releases/:version/artifacts) is cross-checked against it and a mismatch
+  // refused; it is used only when the bundle names none. A bundle naming nothing at all goes to
+  // the only system there is, and failing that to DEFAULT_SYSTEM — with one system there is no
+  // ambiguity to resolve, so nobody is asked to.
+  if (system && inspection.release.system && system !== inspection.release.system) {
+    throw invalidBundle([{
+      rule: 'system_mismatch',
+      message: `This upload was sent to system "${system}", but the bundle declares `
+        + `"${inspection.release.system}".`,
+    }]);
+  }
   const systemName = inspection.release.system
+    ?? system
     ?? await soleSystem()
     ?? config.defaultSystem;
 
@@ -130,24 +142,11 @@ async function examine(received, { version, platforms, kind, expectedSha256 }) {
     });
   }
 
-  // Systems have separate version lines and a version names exactly one of them — that is
-  // the whole mechanism by which a checking node is classified. Letting two systems share a
-  // number would attach this artifact to the other system's release and, worse, make every
-  // node on that version resolve to the wrong system from then on.
-  const existingRelease = await catalog.getRelease(finalVersion);
-  if (existingRelease && existingRelease.system !== systemName) {
+  // Another system using the same number is not a conflict (migration 012): each system has
+  // its own version line, and a release is (system, version). Only the same artifact twice is.
+  if (await catalog.findArtifact(systemName, finalVersion, finalKind, finalPlatform)) {
     throw conflict(
-      `Version ${finalVersion} already belongs to system "${existingRelease.system}", but `
-      + `this bundle declares "${systemName}". Each system has its own version line and a `
-      + 'version number is never reused across systems, because the server identifies a '
-      + "node's system from the version it reports. Give this release a number that "
-      + `"${systemName}" has not used.`,
-    );
-  }
-
-  if (await catalog.findArtifact(finalVersion, finalKind, finalPlatform)) {
-    throw conflict(
-      `An artifact already exists for ${finalVersion} ${finalKind} `
+      `An artifact already exists for ${systemName} ${finalVersion} ${finalKind} `
       + `${finalPlatform ?? '(fleet)'}`,
     );
   }
@@ -190,7 +189,9 @@ export async function stageUpload(req, { version, platforms, kind, expectedSha25
   });
 
   try {
-    const examined = await examine(received, { version, platforms, kind, expectedSha256 });
+    const examined = await examine(received, {
+      version, system: null, platforms, kind, expectedSha256,
+    });
     return {
       token: path.basename(received.tempPath, '.part'),
       size: received.size,
@@ -215,7 +216,7 @@ export async function stageUpload(req, { version, platforms, kind, expectedSha25
  * Re-hashing costs a read of a file that was written minutes ago and is still in page cache,
  * and it is also what catches a temp file that was truncated in the meantime.
  */
-export async function commitUpload(token, { platforms, kind, channel, actor }) {
+export async function commitUpload(token, { platforms, kind, channel, allowRollback = false, actor }) {
   const tempPath = stagedPath(token);
 
   let stat;
@@ -231,13 +232,13 @@ export async function commitUpload(token, { platforms, kind, channel, actor }) {
   const received = { tempPath, size: stat.size, sha256: await fileSha256(tempPath) };
 
   try {
-    const examined = await examine(received, { version: null, platforms, kind });
+    const examined = await examine(received, { version: null, system: null, platforms, kind });
     // The two-step path cannot carry a signature yet: the headers ride with the BODY, which
     // arrived at stage time and was not kept. Run the same gate anyway so
     // SIGNING_REQUIRE_PRESIGNED cannot be bypassed by uploading through the Web UI —
     // silently accepting an unsigned artifact here would defeat the whole setting.
     await checkSignature(received, examined, null, null);
-    return await store(received, { ...examined, channel, actor });
+    return await store(received, { ...examined, channel, allowRollback, actor });
   } catch (err) {
     // Deliberately NOT removing the file: a commit refused because the catalog moved is worth
     // retrying after the operator fixes the cause, and losing the bytes would mean re-sending
@@ -253,16 +254,21 @@ export async function commitUpload(token, { platforms, kind, channel, actor }) {
  * uses the two-step form below instead.
  */
 export async function uploadArtifact(req, {
-  version, platforms, kind, channel, expectedSha256, signature = null, publishedAt = null, actor,
+  version, system = null, platforms, kind, channel, expectedSha256, signature = null,
+  publishedAt = null, allowRollback = false, actor,
 }) {
   const received = await receiveToTempFile(req, {
     dir: TEMP_DIR(), limit: config.uploadMaxBytes,
   });
 
   try {
-    const examined = await examine(received, { version, platforms, kind, expectedSha256 });
+    const examined = await examine(received, {
+      version, system, platforms, kind, expectedSha256,
+    });
     await checkSignature(received, examined, signature, publishedAt);
-    return await store(received, { ...examined, channel, signature, publishedAt, actor });
+    return await store(received, {
+      ...examined, channel, signature, publishedAt, allowRollback, actor,
+    });
   } catch (err) {
     await fsp.rm(received.tempPath, { force: true })
       .catch((rmErr) => logger.error('could not remove the upload temp file', rmErr));
@@ -293,7 +299,7 @@ async function checkSignature(received, examined, signature, publishedAt) {
   // second upload has to match what the release already carries.
   // mapRelease already hands back an RFC3339 string trimmed to seconds, which is the exact
   // form the signer used.
-  const existing = await catalog.getRelease(examined.version);
+  const existing = await catalog.getRelease(examined.system, examined.version);
   if (existing?.publishedAt && existing.publishedAt !== publishedAt) {
     throw conflict(
       `Release ${examined.version} was published at ${existing.publishedAt}, but this upload `
@@ -321,10 +327,26 @@ async function checkSignature(received, examined, signature, publishedAt) {
 }
 
 async function store(received, {
-  inspection, version, kind, platform, platforms, channel, system, signature, publishedAt, actor,
+  inspection, version, kind, platform, platforms, channel, system, signature, publishedAt,
+  allowRollback = false, actor,
 }) {
+  // The same backward-move guard the promote endpoint applies, from the same function. Until
+  // this existed, an upload naming a channel was the one way to move one backwards without
+  // being asked — which is how beta went from 0.13.5 to 0.13.4 during an ordinary upload.
+  //
+  // BEFORE the rename below, and deliberately so. A refusal after it would have moved the
+  // staged bytes to their final path and then deleted them, and the two-step commit promises
+  // the opposite: it keeps the file precisely so a refused commit can be retried without
+  // re-sending the bundle. A refusal that destroys the only copy of what it is asking you to
+  // confirm is not a confirmation, it is a dead end.
+  if (channel && !allowRollback) {
+    const current = await catalog.getChannel(system, channel);
+    const finding = rollbackFinding(system, channel, current?.latest ?? null, version);
+    if (finding) throw invalidBundle([finding]);
+  }
+
   const file = kind === 'fleet' ? 'fleet.tar.gz' : `${platform}.tar.gz`;
-  const finalPath = catalog.artifactPath(version, file);
+  const finalPath = catalog.artifactPath(system, version, file);
   await fsp.mkdir(path.dirname(finalPath), { recursive: true });
 
   // Same filesystem, so this is atomic: a downloader sees either the old file or the new one.
@@ -344,7 +366,7 @@ async function store(received, {
         `INSERT INTO release (version, version_key, system, min_version, mandatory, notes,
                               published_at, created_by)
          VALUES ($1, $2, $3, $4, $5, $6, COALESCE($8::timestamptz, now()), $7)
-         ON CONFLICT (version) DO NOTHING
+         ON CONFLICT (system, version) DO NOTHING
          RETURNING version`,
         [
           version, parseVersion(version), system,
@@ -357,19 +379,19 @@ async function store(received, {
         await insertAudit({
           actor,
           action: 'release.create',
-          subject: version,
+          subject: `${system}/${version}`,
           detail: { auto: true, system, ...inspection.release },
         }, client);
       }
 
       const inserted = await client.query(
         `INSERT INTO artifact
-           (version, kind, platform, platforms, file, size, sha256, uploaded_by,
+           (system, version, kind, platform, platforms, file, size, sha256, uploaded_by,
             bundle_format, inspection,
             signature_alg, signature_key_id, signature_value)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
         [
-          version, kind, platform, platforms, file, received.size, received.sha256, actor,
+          system, version, kind, platform, platforms, file, received.size, received.sha256, actor,
           inspection.format, JSON.stringify(serializeInspection(inspection)),
           // Columns that have existed since 001_init and, until now, nothing ever wrote.
           signature?.alg ?? null, signature?.key_id ?? null, signature?.value ?? null,
@@ -408,7 +430,7 @@ async function store(received, {
       await insertAudit({
         actor,
         action: 'artifact.upload',
-        subject: `${version}/${file}`,
+        subject: `${system}/${version}/${file}`,
         detail: {
           kind,
           platform,
@@ -462,7 +484,7 @@ async function store(received, {
     });
 
     logger.info(
-      `published ${version} ${kind} ${platform ?? ''} (${received.size} bytes, `
+      `published ${system}/${version} ${kind} ${platform ?? ''} (${received.size} bytes, `
       + `${inspection.format}, ${inspection.warnings.length} warnings) by ${actor}`
       + (promoted ? ` and promoted to ${promoted}` : ''),
     );
@@ -479,7 +501,7 @@ async function store(received, {
       // now belongs to the upload whose row committed; deleting it here left that row pointing
       // at nothing, and the catalog offering a release whose bytes were gone.
       throw conflict(
-        `An artifact for ${version} ${kind}${platform ? ` ${platform}` : ''} `
+        `An artifact for ${system} ${version} ${kind}${platform ? ` ${platform}` : ''} `
         + 'was uploaded concurrently.',
       );
     }

@@ -34,7 +34,7 @@ describe('GET /api/v1/update/check', { skip: hasDatabase ? false : SKIP_MESSAGE 
     `/api/v1/update/check?${new URLSearchParams(query)}`, { headers: fleetHeaders(headers) },
   );
 
-  const base = { serial: 'SN-42', platform: 'linux-x86_64', version: '0.13.3' };
+  const base = { serial: 'SN-42', platform: 'linux-x86_64', version: '0.13.3', system: 'default' };
 
   test('offers a newer release with the full manifest field set', async () => {
     const res = await check(base);
@@ -103,6 +103,7 @@ describe('GET /api/v1/update/check', { skip: hasDatabase ? false : SKIP_MESSAGE 
 
     const body = (await check({
       serial: 'SN-OLD', platform: 'linux-aarch64', version: '0.9.0', channel: 'edge',
+      system: 'default',
     })).json();
 
     assert.ok('0.9.0' > '0.10.0', 'lexically the offer would be suppressed');
@@ -115,6 +116,8 @@ describe('GET /api/v1/update/check', { skip: hasDatabase ? false : SKIP_MESSAGE 
       [{ platform: 'linux-x86_64', version: '0.1.0' }, 'missing_parameter'],
       [{ serial: 'SN-42', version: '0.1.0' }, 'missing_parameter'],
       [{ serial: 'SN-42', platform: 'linux-x86_64' }, 'missing_parameter'],
+      // Required since two systems may share a version number: the number cannot place a node.
+      [{ serial: 'SN-42', platform: 'linux-x86_64', version: '0.1.0' }, 'missing_parameter'],
       [{ ...base, serial: '' }, 'missing_parameter'],
       [{ ...base, version: 'v1.0' }, 'invalid_parameter'],
       [{ ...base, platform: 'plan9-vax' }, 'invalid_parameter'],
@@ -176,6 +179,7 @@ describe('GET /api/v1/update/check', { skip: hasDatabase ? false : SKIP_MESSAGE 
   test('with no slim artifact the fleet bundle is offered, with the sorted target', async () => {
     const body = (await check({
       serial: 'SN-AND', platform: 'android-aarch64', version: '0.13.0', channel: 'beta',
+      system: 'default',
     })).json();
 
     assert.equal(body.update_available, true);

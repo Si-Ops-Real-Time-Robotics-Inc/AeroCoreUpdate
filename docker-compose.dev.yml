@@ -11,10 +11,19 @@
 # it runs as `node` (uid 1000), the same uid as the developer on most machines, so a stray
 # write would land in the working tree looking like an edit nobody made.
 services:
-  aeroserver:
+  aerocoreupdate:
     volumes:
       - ./src:/app/src:ro
       - ./public:/app/public:ro
+      #
+      # NOTE: this shadows the image's /app/public, and the image is where the two UIs are
+      # merged — the new bundle at /admin/ and the previous one at /admin/legacy.html. Under
+      # this mount the container serves whatever public/admin holds on the host, which is the
+      # PREVIOUS UI. Reproducing the merge here needs mountpoints inside a read-only mount,
+      # which runc refuses.
+      #
+      # So the dev loop for the new UI is `npm run dev` in webui/ (vite on :5175, proxying to
+      # this container), and the merged arrangement is verified against the built image.
     environment:
       # Readable logs while debugging. Production keeps the default.
       LOG_LEVEL: debug

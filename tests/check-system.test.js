@@ -8,10 +8,10 @@ import {
 /**
  * Placing a node by the `system` it reports (spec section 2, "Placing a node").
  *
- * The node has been sending this all along — `UpdateClient::check` appends `&system=` from its
- * own runtime manifest — and the server used to drop it and infer the system from the version
- * instead. These tests pin the order the server now resolves in, and the two cases where it
- * deliberately refuses to guess.
+ * `UpdateClient::check` appends `&system=` from the node's own runtime manifest, and since
+ * migration 012 it is the only thing that can place a node: two systems may publish the same
+ * version number, so the version says nothing about which product is asking. These tests pin
+ * the order the server resolves in, and that a node which does not say is refused by name.
  *
  * The stakes are why guessing is not an option: handing a node another system's core swaps its
  * plugin set and its config in one step, and the node records that as a non-fatal
@@ -108,47 +108,50 @@ describe('check: placing a node by system', { skip: hasDatabase ? false : SKIP_M
       'auto-creating would turn a typo into a version line nothing is published to');
   });
 
-  test('a claim contradicting the running version parks the node', async () => {
-    // 0.15.0 belongs to HERA, so a node on it claiming `drone` is either a device that was
-    // just moved or a mis-stamped build. Both look identical from here.
+  test('a version another system published does not move a node off its own line', async () => {
+    // 0.15.0 is a HERA release. It used to follow that a node on 0.15.0 was a HERA node, and
+    // one claiming `drone` was parked as a contradiction. Numbers are per system now, so the
+    // claim is the answer and the version is only where on the drone line it stands.
     const res = await check({
       serial: 'SN-MIX', platform: 'linux-x86_64', version: '0.15.0', system: 'drone',
     });
 
     assert.equal(res.status, 200);
-    assert.equal(res.json().update_available, false);
-
-    const node = await unplaced('SN-MIX');
-    assert.ok(node);
-    assert.equal(node.reported_system, 'drone');
+    assert.equal(res.json().version, '2.1.0', 'offered the drone line');
+    assert.equal(await unplaced('SN-MIX'), undefined, 'nothing to review');
   });
 
-  test('an operator assignment settles a contradiction', async () => {
-    const assign = await session.api('/admin/api/unclassified/SN-MIX', {
-      method: 'PUT', body: JSON.stringify({ system: 'drone' }),
+  test('an operator assignment outranks what the node claims', async () => {
+    // Parked first — an assignment is made on a node the server could not place.
+    await check({
+      serial: 'SN-MOVED', platform: 'linux-x86_64', version: '0.13.0', system: 'HERA-3',
+    });
+    assert.ok(await unplaced('SN-MOVED'));
+
+    const assign = await session.api('/admin/api/unclassified/SN-MOVED', {
+      method: 'PUT', body: JSON.stringify({ system: 'HERA' }),
     });
     assert.equal(assign.status, 200, assign.text());
 
+    // Still claiming something else — a mis-stamped build is what an assignment corrects.
     const res = await check({
-      serial: 'SN-MIX', platform: 'linux-x86_64', version: '0.15.0', system: 'drone',
+      serial: 'SN-MOVED', platform: 'linux-x86_64', version: '0.13.0', system: 'drone',
     });
 
-    assert.equal(res.status, 200, 'a human decided, so there is nothing left to guess');
-    assert.equal(res.json().version, '2.1.0');
+    assert.equal(res.status, 200);
+    assert.equal(res.json().version, '0.15.0', 'a human decided: the HERA line');
   });
 
-  test('a node that sends no system still resolves by its version', async () => {
-    // An older build with nothing stamped. It must keep working exactly as before.
+  test('a node that sends no system is refused, by name', async () => {
+    // A build that was never stamped. Its version cannot place it — 0.15.0 may exist in any
+    // number of systems — and answering "no update" forever would hide why it never updates.
     const res = await check({
       serial: 'SN-OLD', platform: 'linux-x86_64', version: '0.15.0',
     });
 
-    // It is already on the channel's latest, so there is nothing to offer — an offer must be
-    // strictly newer. What proves it was PLACED is the channel list: an unplaced node gets
-    // none, because channels belong to a system and it would have no system.
-    assert.equal(res.status, 200);
-    assert.equal(res.json().update_available, false);
-    assert.ok(res.json().channels.includes('stable'), 'placed on the HERA line via its version');
+    assert.equal(res.status, 400);
+    assert.equal(res.json().error, 'missing_parameter');
+    assert.match(res.json().message, /system/);
   });
 
   test('the ETag changes with the system, so a moved node cannot reuse its answer', async () => {
@@ -162,12 +165,13 @@ describe('check: placing a node by system', { skip: hasDatabase ? false : SKIP_M
     assert.notEqual(hera.headers.etag, drone.headers.etag);
   });
 
-  test('a blank system parameter behaves as if it were absent', async () => {
+  test('a blank system parameter is refused like an absent one', async () => {
     const res = await check({
       serial: 'SN-BLANK', platform: 'linux-x86_64', version: '0.15.0', system: '',
     });
 
-    assert.equal(res.status, 200, 'an empty stamp says nothing; it is not a wrong claim');
+    assert.equal(res.status, 400, 'an empty stamp says nothing, so it cannot place a node');
+    assert.equal(res.json().error, 'missing_parameter');
   });
 
   // ── download names the product too ────────────────────────────────────────────────────
@@ -192,8 +196,8 @@ describe('check: placing a node by system', { skip: hasDatabase ? false : SKIP_M
   });
 
   test('asking for another system\'s bytes is refused', async () => {
-    // 0.15.0 belongs to HERA. A drone node with a valid fleet key must not be able to pull it
-    // by knowing the number.
+    // 0.15.0 is a HERA release and drone has none by that number. A drone node with a valid
+    // fleet key must not be able to pull HERA's by knowing it.
     const res = await download({
       version: '0.15.0', platform: 'linux-x86_64', system: 'drone', channel: 'stable',
     });

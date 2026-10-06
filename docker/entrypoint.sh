@@ -12,7 +12,7 @@ set -eu
 
 CERT="${TLS_CERT_FILE:-/data/tls/server.crt}"
 KEY="${TLS_KEY_FILE:-/data/tls/server.key}"
-CN="${TLS_CN:-aeroserver}"
+CN="${TLS_CN:-aerocoreupdate}"
 
 # TLS_SAN entries may be written as DNS:name or IP:addr, or bare — a bare entry that looks
 # like an IPv4 address becomes IP:, anything else DNS:.

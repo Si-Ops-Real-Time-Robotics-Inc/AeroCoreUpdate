@@ -12,7 +12,13 @@ export function errorHandler(handler) {
       const isHttp = err instanceof HttpError;
       const status = isHttp ? err.status : 500;
       const code = isHttp ? err.code : 'server_error';
-      const message = status >= 500 && isProduction() ? 'Internal server error' : err.message;
+
+      // Mask by ORIGIN, not by status. An HttpError's message was written to be read by the
+      // caller — `maintenance` says "Temporarily unavailable", upstreamUnavailable says which
+      // service to wait on — and masking every 5xx swallowed all of them, so a 503 anyone was
+      // meant to retry arrived saying "Internal server error" and reading like a crash.
+      // What must never escape is a raw throw, whose message is for the log alone.
+      const message = isHttp || !isProduction() ? err.message : 'Internal server error';
 
       if (status >= 500) logger.error(`${req.method} ${req.url}`, err);
 

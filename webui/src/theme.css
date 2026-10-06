@@ -1,0 +1,363 @@
+@import "tailwindcss";
+
+/* ─────────────────────────────────────────────────────────────────────
+   AeroTunnel — the ClickHouse design system, applied to a product surface.
+
+   The system in .claude/rules/DESIGN-clickhouse.md was read off a marketing
+   site: hero bands, pricing tiers, 96px section rhythm, 56px stat numbers. Its
+   own Known Gaps section says the product surface "adds many product-specific
+   components that are out of scope", and this application is entirely product
+   surface — dense tables of flights, status badges, a row per machine.
+
+   So what is taken is the language, not the layout: the near-black canvas, the
+   single yellow voltage used scarcely, Inter at 700/600/400, the 8px button
+   radius, the 4px spacing base, and the rule that depth comes from surface
+   contrast rather than shadow. What is not taken is the marketing rhythm — a
+   96px gap between two tables would be a screen you scroll instead of read.
+
+   Two departures from the document, both decided deliberately:
+
+   1. The yellow is #f7ec13, RTRobotics' own — it is on the monogram and on the
+      airframe. The document's #faff69 was, by its own admission, sampled from a
+      screenshot rather than published. Using ours keeps the brand contract the
+      system is built around while making it this company's contract.
+
+   2. There is a light mode. The document has none — "no light-mode marketing
+      surface" — and for a marketing page that is right. This is a flight
+      operations screen that a pilot may open on a tablet in daylight, where a
+      #0a0a0a canvas is not a style choice but an unreadable one. The light
+      palette is derived from the same tokens rather than invented beside them.
+   ───────────────────────────────────────────────────────────────────── */
+
+@theme {
+  /* ── type ──
+     One family, three weights. The document is explicit that hierarchy comes
+     from size, never from weight gradation, and that nothing goes above 700. */
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Display sizes are the document's, scaled for a dashboard: the marketing
+     72/56/40 becomes a page title and a stat number, because a table screen has
+     no hero to fill. Everything from title-md down is unchanged. */
+  --text-display: 32px;
+  --text-display--line-height: 1.15;
+  --text-display--letter-spacing: -1px;
+  --text-stat: 28px;
+  --text-stat--line-height: 1.05;
+  --text-stat--letter-spacing: -0.8px;
+  --text-title-lg: 24px;
+  --text-title-lg--line-height: 1.3;
+  --text-title-lg--letter-spacing: -0.3px;
+  --text-title-md: 18px;
+  --text-title-md--line-height: 1.4;
+  --text-title-sm: 16px;
+  --text-title-sm--line-height: 1.4;
+  --text-body: 14px;
+  --text-body--line-height: 1.55;
+  --text-caption: 13px;
+  --text-caption--line-height: 1.4;
+  --text-overline: 12px;
+  --text-overline--line-height: 1.4;
+  --text-overline--letter-spacing: 1.5px;
+
+  /* ── shape ── */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* ── spacing ── 4px base, the document's own scale. */
+  --spacing: 4px;
+}
+
+/* ── colour ──
+   Dark is the default and the one the system is designed for. Light is a
+   derivation: the same roles, the same yellow, inverted surfaces — not a second
+   palette with opinions of its own.
+
+   `@theme inline` so the utilities resolve to the variables rather than baking
+   one mode's values into the class, which is what lets the toggle work at all. */
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-elevated: var(--elevated);
+  --color-hairline: var(--hairline);
+  --color-hairline-strong: var(--hairline-strong);
+
+  --color-ink: var(--ink);
+  --color-body: var(--body);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+
+  --color-primary: var(--primary);
+  --color-primary-active: var(--primary-active);
+  --color-primary-disabled: var(--primary-disabled);
+  --color-on-primary: var(--on-primary);
+
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+}
+
+:root {
+  /* Dark — the system's own values, with RTRobotics yellow in place of the
+     sampled one. Depth is surface contrast: canvas → surface → elevated are
+     three barely-separated tones, and there are no shadows anywhere. */
+  --canvas: #0a0a0a;
+  --surface: #1a1a1a;
+  --elevated: #242424;
+  --hairline: #2a2a2a;
+  --hairline-strong: #3a3a3a;
+
+  --ink: #ffffff;
+  --body: #cccccc;
+  --muted: #888888;
+  --faint: #5a5a5a;
+
+  --primary: #f7ec13;
+  --primary-active: #d9d011;
+  --primary-disabled: #3a3a1f;
+  --on-primary: #0a0a0a;
+
+  /* Semantic colours are the document's. They appear on badges and nowhere
+     else — the rule against a second brand colour is about surfaces and CTAs,
+     not about a status that has to be legible as pass or fail. */
+  --success: #22c55e;
+  --success-soft: #10281a;
+  --warning: #f59e0b;
+  --warning-soft: #2a1f08;
+  --danger: #ef4444;
+  --danger-soft: #2a1213;
+
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --canvas: #ffffff;
+  --surface: #f6f6f4;
+  --elevated: #ecece8;
+  --hairline: #e0e0da;
+  --hairline-strong: #c9c9c1;
+
+  --ink: #0a0a0a;
+  --body: #33332f;
+  --muted: #6b6b64;
+  --faint: #9a9a92;
+
+  /* The yellow is unchanged — it is the brand contract. What changes is what
+     sits on it: black on yellow reads at either end, and this is the one place
+     the palette does not invert. */
+  --primary: #f7ec13;
+  --primary-active: #d9d011;
+  --primary-disabled: #eeecc9;
+  --on-primary: #0a0a0a;
+
+  /* Darkened so they clear 4.5:1 on a white canvas; the dark mode's brighter
+     values would be decorative rather than readable here. */
+  --success: #15803d;
+  --success-soft: #dcf5e4;
+  --warning: #a16207;
+  --warning-soft: #fbf0d5;
+  --danger: #b91c1c;
+  --danger-soft: #fbe2e2;
+
+  color-scheme: light;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-hairline);
+  }
+
+  body {
+    background: var(--color-canvas);
+    color: var(--color-body);
+    font-family: var(--font-sans);
+    font-size: var(--text-body);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    margin: 0;
+  }
+
+  h1, h2, h3 {
+    color: var(--color-ink);
+    font-weight: 700;
+    letter-spacing: -0.3px;
+  }
+
+  /* One focus ring, in the brand yellow, used for nothing else — so a keyboard
+     user can find it without reading the page. Offset rather than inset so it
+     never sits on a border and reads as a thicker edge. */
+  :where(a, button, input, textarea, select, [tabindex]):focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+
+  ::placeholder { color: var(--color-faint); }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   The overview's own vocabulary.
+
+   This screen already had a design system before Tailwind arrived — a data
+   card, a stat tile, a two-series traffic bar whose colours were picked by
+   running a palette validator for ΔE separation under protanopia and
+   tritanopia. Re-expressing it as inline utilities would have thrown that away
+   and left the chart colours as two hex values nobody could defend.
+
+   So the class names stay and point at the new tokens instead. The idioms are
+   named, which is what let the screen be consistent in the first place.
+   ───────────────────────────────────────────────────────────────────── */
+@layer components {
+  /* The two series. Not the brand yellow: yellow on this canvas is the CTA
+     voltage, and a chart that speaks in it competes with the one action on the
+     page. These two were validated for separation under colour-blind
+     simulation — re-run that check before changing either. */
+  :root {
+    --series-air: #4f9cf9;
+    --series-gcs: #f7ec13;
+  }
+  :root[data-theme="light"] {
+    --series-air: #1b5e9c;
+    --series-gcs: #8a6300;
+  }
+
+  .dashgrid {
+    display: grid;
+    gap: 16px;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  }
+  .dashgrid .wide { grid-column: 1 / -1; }
+
+  .datacard,
+  .statcard {
+    background: var(--color-surface);
+    border: 1px solid var(--color-hairline);
+    border-radius: var(--radius-lg);
+    min-width: 0;
+  }
+  .datacard { padding: 0 20px 16px; }
+  .statcard { padding: 20px; }
+
+  .datacard-head {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding: 18px 0 12px;
+  }
+  .datacard-head h2 {
+    margin: 0; font-size: var(--text-title-sm); font-weight: 600; color: var(--color-ink);
+  }
+  .head-trail { margin-left: auto; color: var(--color-muted); font-size: var(--text-caption); }
+
+  .lab {
+    color: var(--color-muted); font-size: var(--text-overline);
+    letter-spacing: 1.5px; text-transform: uppercase; font-weight: 600;
+  }
+  .statnum {
+    font-size: var(--text-stat); font-weight: 700; letter-spacing: -0.8px;
+    font-variant-numeric: tabular-nums; line-height: 1.05; margin-top: 6px;
+    color: var(--color-ink);
+  }
+  .statnum small { font-size: var(--text-body); font-weight: 500; color: var(--color-muted); margin-left: 4px; }
+  .statnum.small { font-size: var(--text-title-lg); letter-spacing: -0.3px; }
+  .sub { color: var(--color-muted); font-size: var(--text-caption); margin-top: 4px; }
+  .val { font-variant-numeric: tabular-nums; color: var(--color-ink); }
+
+  .datarow {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
+    padding: 10px 0; border-top: 1px solid var(--color-hairline);
+  }
+  .datarow .lab { text-transform: none; letter-spacing: 0; font-size: var(--text-caption); font-weight: 400; }
+  .datarow .val { text-align: right; }
+
+  .rowlist { display: flex; flex-direction: column; margin-top: 12px; }
+  .rowlist-item {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 0; border-top: 1px solid var(--color-hairline);
+  }
+  .rowlist-item:first-child { border-top: 0; }
+  .rowlist-body { min-width: 0; flex: 1; }
+  .rowlist-body b { display: block; font-size: var(--text-body); font-weight: 600; color: var(--color-ink); }
+  .rowlist-body > span { display: block; font-size: var(--text-caption); color: var(--color-muted); }
+  .rowlist-trail { flex: none; text-align: right; font-size: var(--text-caption); color: var(--color-muted); font-variant-numeric: tabular-nums; }
+  .avatar {
+    width: 32px; height: 32px; border-radius: 9999px; flex: none;
+    background: var(--color-elevated); color: var(--color-primary);
+    display: grid; place-items: center; font-size: 11px; font-weight: 700;
+  }
+
+  .quota { padding: 14px 0 8px; }
+  .quota-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
+  .quota-row.spaced { margin-top: 18px; }
+  .quota-row .lab { text-transform: none; letter-spacing: 0; font-size: var(--text-caption); font-weight: 400; }
+  .quota-row .val { font-size: var(--text-caption); }
+
+  /* The track is the allowance; the fill is what is gone. An overrun repaints
+     the whole fill rather than running past the end — a bar off its own track
+     reads as a rendering bug rather than a warning. */
+  .meter { height: 8px; border-radius: 9999px; background: var(--color-elevated); overflow: hidden; }
+  .meter i.used { display: block; height: 100%; background: var(--color-primary); border-radius: 9999px; }
+  .meter i.used.over { background: var(--color-danger); }
+
+  .bars { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
+  .barrow {
+    display: grid; grid-template-columns: minmax(96px, 132px) 1fr auto;
+    gap: 12px; align-items: center; font-size: var(--text-caption);
+  }
+  .barrow .lbl { color: var(--color-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .barrow .val { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .track { display: flex; gap: 2px; height: 16px; background: var(--color-elevated); border-radius: var(--radius-xs); overflow: hidden; }
+  .seg { height: 100%; min-width: 2px; }
+  .seg.air { background: var(--series-air); }
+  .seg.gcs { background: var(--series-gcs); }
+
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: var(--text-caption); color: var(--color-muted); margin: 12px 0; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+  .swatch.air { background: var(--series-air); }
+  .swatch.gcs { background: var(--series-gcs); }
+
+  .card-empty { margin: 12px 0 0; font-size: var(--text-caption); color: var(--color-muted); }
+  .muted { color: var(--color-muted); }
+  .lede { color: var(--color-muted); max-width: 68ch; }
+
+  .note {
+    background: var(--color-surface); color: var(--color-body);
+    border-left: 2px solid var(--color-hairline-strong);
+    padding: 12px 16px; border-radius: var(--radius-md); margin: 14px 0;
+    font-size: var(--text-body);
+  }
+  .note.warn-note { background: var(--color-warning-soft); border-left-color: var(--color-warning); color: var(--color-warning); }
+
+  /* The overview's inline badges, matching the Badge component. */
+  .pill {
+    display: inline-flex; align-items: center; border-radius: 9999px;
+    padding: 4px 12px; font-size: var(--text-caption); font-weight: 500;
+    background: var(--color-elevated); color: var(--color-body);
+    border: 1px solid var(--color-hairline-strong); white-space: nowrap;
+  }
+  .pill.bad { background: var(--color-danger-soft); color: var(--color-danger); border-color: transparent; }
+
+  @media (max-width: 640px) {
+    .barrow {
+      grid-template-columns: 1fr auto;
+      grid-template-areas: "lbl lbl" "track val";
+      gap: 4px 10px;
+    }
+    .barrow .lbl { grid-area: lbl; }
+    .barrow .track { grid-area: track; }
+    .barrow .val { grid-area: val; }
+    .statnum { font-size: var(--text-title-lg); }
+  }
+}

@@ -8,14 +8,15 @@ import { loadTlsContext, logCertificate, watchCertificate } from './core/tls.js'
 import { pruneTempFiles } from './core/files.js';
 import { closePool, connectWithRetry } from './db/pool.js';
 import { migrate } from './db/migrate.js';
-import { bootstrapAdmin } from './services/auth.service.js';
 import { initSigning, logSigningKey } from './services/signing.service.js';
 import { initOidc } from './core/oidc.js';
 import { setTlsInfo } from './services/tlsInfo.service.js';
 import { listChannels } from './repositories/catalog.repository.js';
 import { pruneCheckLog } from './repositories/telemetry.repository.js';
-import { pruneExpiredTokens, pruneLoginAttempts } from './repositories/auth.repository.js';
+import { pruneRegistrationAttempts }
+  from './repositories/auth.repository.js';
 import { tempDir } from './services/publish.service.js';
+import { moveLegacyArtifacts } from './services/artifactLayout.service.js';
 
 const servers = [];
 
@@ -24,7 +25,8 @@ async function main() {
 
   await connectWithRetry();
   if (config.runMigrations) await migrate();
-  await bootstrapAdmin();
+  // The files half of migration 012. Before anything can serve a download.
+  await moveLegacyArtifacts();
 
   await initSigning();
   logSigningKey();
@@ -74,9 +76,6 @@ async function main() {
 function assertRequiredSecrets() {
   const missing = [];
   if (!config.databaseUrl) missing.push('DATABASE_URL');
-  // Still required with Keycloak in play: it signs the LOCAL admin session, which is the
-  // break-glass route this server keeps for when the IdP is down.
-  if (!config.jwtSecret) missing.push('JWT_SECRET');
   // Only when the fleet still authenticates with it. Under FLEET_AUTH_MODE=jwt nothing ever
   // reads the key, so demanding one would be asking for a secret to satisfy a check rather
   // than a purpose — and an unused secret is one more thing to leak.
@@ -89,10 +88,6 @@ function assertRequiredSecrets() {
     process.exit(1);
   }
   for (const name of missing) logger.warn(`${name} is not set`);
-  if (!config.jwtSecret) {
-    logger.error('JWT_SECRET is required even in development; set it and restart');
-    process.exit(1);
-  }
 }
 
 function listen(server, port, label) {
@@ -100,7 +95,7 @@ function listen(server, port, label) {
     server.once('error', reject);
     server.listen(port, config.host, () => {
       server.removeListener('error', reject);
-      logger.info(`AeroServer [${config.env}] listening on ${label}`);
+      logger.info(`AeroCoreUpdate [${config.env}] listening on ${label}`);
       resolve();
     });
   });
@@ -128,8 +123,7 @@ async function housekeeping() {
     const removed = await pruneTempFiles(tempDir());
     if (removed) logger.info(`removed ${removed} abandoned upload temp files`);
     await pruneCheckLog();
-    await pruneExpiredTokens();
-    await pruneLoginAttempts();
+    await pruneRegistrationAttempts();
   } catch (err) {
     logger.error('housekeeping failed', err);
   }

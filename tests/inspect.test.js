@@ -34,7 +34,7 @@ describe('bundle inspection on upload', { skip: hasDatabase ? false : SKIP_MESSA
 
   const listVersionDir = async (version) => {
     try {
-      return await fsp.readdir(path.join(artifactsDir, version));
+      return await fsp.readdir(path.join(artifactsDir, 'default', version));
     } catch {
       return [];
     }
@@ -154,7 +154,7 @@ describe('bundle inspection on upload', { skip: hasDatabase ? false : SKIP_MESSA
   test('a version asserted in the URL must match the bundle', async () => {
     const body = bundle({ version: '0.20.0', cores: [{ platform: 'linux-x86_64' }] });
 
-    const res = await session.api('/admin/api/releases/0.21.0/artifacts', {
+    const res = await session.api('/admin/api/systems/default/releases/0.21.0/artifacts', {
       method: 'POST', headers: { 'Content-Type': 'application/gzip' }, body,
     });
 
@@ -216,7 +216,7 @@ describe('bundle inspection on upload', { skip: hasDatabase ? false : SKIP_MESSA
       method: 'PUT', body: JSON.stringify({ latest: '0.25.0' }),
     });
     const check = await server.request(
-      '/api/v1/update/check?serial=SN-U&platform=linux-x86_64&version=0.13.0'
+      '/api/v1/update/check?system=default&serial=SN-U&platform=linux-x86_64&version=0.13.0'
       + '&system=default&channel=stable',
       { headers: { 'X-API-Key': 'test-fleet-key-0123456789' } },
     );
@@ -302,7 +302,7 @@ describe('bundle inspection on upload', { skip: hasDatabase ? false : SKIP_MESSA
     const res = await upload(body);
     assert.equal(res.status, 201, res.text());
 
-    const onDisk = await fsp.readFile(path.join(artifactsDir, '0.32.0', 'linux-x86_64.tar.gz'));
+    const onDisk = await fsp.readFile(path.join(artifactsDir, 'default', '0.32.0', 'linux-x86_64.tar.gz'));
     assert.ok(onDisk.equals(body));
     assert.equal(res.json().sha256, sha256Hex(body));
   });

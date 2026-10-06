@@ -1,7 +1,7 @@
 import { etagMatches, readJsonBody, sendEmpty, sendJson } from '../core/http.js';
 import { parseRange } from '../core/range.js';
 import { sendFile } from '../core/files.js';
-import { rangeNotSatisfiable } from '../core/errors.js';
+import { forbidden, rangeNotSatisfiable } from '../core/errors.js';
 import * as updateService from '../services/update.service.js';
 import { resolveArtifact } from '../services/download.service.js';
 import * as telemetry from '../repositories/telemetry.repository.js';
@@ -10,8 +10,24 @@ import {
 } from '../validators/update.validator.js';
 
 /** GET /api/v1/update/check — the single-node form (spec section 2). */
+/**
+ * Refuse a channel this credential does not serve.
+ *
+ * Refused rather than quietly redirected to the channel it may have: a device that asked for
+ * beta and was handed stable would report success and run something nobody chose for it, and
+ * the mistake — usually one line in a node's config — would never surface.
+ */
+function assertChannelAllowed(req, channel) {
+  if (!req.fleetChannels || req.fleetChannels.includes(channel)) return;
+  throw forbidden(
+    `This credential follows ${req.fleetChannels.join(', ')} only, and this request asked `
+    + `for ${channel}. Change the node's channel, or grant a wider role in Keycloak.`,
+  );
+}
+
 export async function checkGet(req, res) {
   const params = validateCheckQuery(req.query);
+  assertChannelAllowed(req, params.channel);
   const { etag, body, offered, system } = await updateService.checkSingleNode({
     ...params, fleet: req.fleet,
   });
@@ -37,7 +53,8 @@ export async function checkGet(req, res) {
 /** GET /api/v1/update/download/{version} (spec section 6). */
 export async function download(req, res) {
   const { version, platform, system } = validateDownloadRequest(req.params, req.query);
-  const artifact = await resolveArtifact(version, platform, system);
+  const artifact = await resolveArtifact(version, platform, system,
+    { channels: req.fleetChannels });
 
   // Conditional requests take precedence over Range (RFC 9110).
   if (etagMatches(req.headers['if-none-match'], artifact.etag)) {

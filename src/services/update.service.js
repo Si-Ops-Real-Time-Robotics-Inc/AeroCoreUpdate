@@ -7,7 +7,7 @@ import { isNewer } from '../domain/version.js';
 import * as catalog from '../repositories/catalog.repository.js';
 import { buildManifest } from './manifest.service.js';
 import { artifactReadable } from './download.service.js';
-import { assignedSystem, findSystem, recordUnclassified, soleSystem, systemForVersion }
+import { assignedSystem, findSystem, recordUnclassified }
   from '../repositories/system.repository.js';
 
 /**
@@ -82,26 +82,25 @@ export async function checkSingleNode({
 }
 
 /**
- * Which system this node belongs to. Everything else — channel, pin, rollout, the release
- * itself — is scoped to the answer, so nothing can be decided before it.
+ * Which system this node belongs to. Everything else — channel, rollout, the release itself —
+ * is scoped to the answer, so nothing can be decided before it.
  *
- * The node now tells us directly: UpdateClient::check sends `system` from its own runtime
- * manifest whenever the build was stamped. That is evidence, not an instruction. In order:
+ * The node says so itself: UpdateClient::check sends `system` from its own runtime manifest,
+ * and the validator refuses a check without one. The version cannot answer this any more —
+ * since migration 012 two systems may publish the same number, so 0.2.0 alone names nothing.
+ * In order:
  *
  *   1. an assignment an operator made for this serial — a human already decided
- *   2. the system the node claims, when it exists and nothing contradicts it
- *   3. the system of the release carrying the node's version
- *   4. the only system there is
+ *   2. the system the node claims, when this server has it
  *
- * Two cases deliberately produce nothing rather than a guess, and are recorded instead:
- * a claim naming a system this server does not have, and a claim that contradicts the version
- * the node is running. Handing a node another system's core swaps its plugin set and its
+ * A claim naming a system this server does not have produces nothing rather than a guess, and
+ * is recorded for an admin. Handing a node another system's core swaps its plugin set and its
  * config in one step, and the node applies it as a silent non-fatal skip — so a wrong answer
  * here is worse than no answer.
  */
 async function resolveSystem(node) {
-  // 1. An operator's assignment outranks everything, including a node contradicting itself:
-  //    placing it is exactly the decision this asks a human to make.
+  // 1. An operator's assignment outranks the claim: placing a node is exactly the decision
+  //    this asks a human to make, and a mis-stamped build is what it exists to correct.
   const assigned = await assignedSystem(node.serial);
   if (assigned) {
     // Still record the sighting, so the admin sees it is alive and on which version.
@@ -109,50 +108,12 @@ async function resolveSystem(node) {
     return assigned;
   }
 
-  const fromVersion = await systemForVersion(node.version);
-
   // 2. What the node says about itself.
-  if (node.system) {
-    if (!await findSystem(node.system)) {
-      logger.warn(
-        `node ${node.serial ?? '(no serial)'} reports system "${node.system}", which does not `
-        + 'exist here; offering no update until an admin places it or creates that system',
-      );
-      recordUnclassified(node, node.fleet);
-      return null;
-    }
-
-    if (fromVersion && fromVersion !== node.system) {
-      // One of the two is wrong and there is no way to tell which: a node just moved between
-      // systems reports the newer truth, while a mis-stamped build reports a lie, and both
-      // look like this. Picking either would be a guess with fleet-wide consequences.
-      logger.warn(
-        `node ${node.serial ?? '(no serial)'} reports system "${node.system}" but its version `
-        + `${node.version} belongs to "${fromVersion}"; offering no update until an admin `
-        + 'resolves it',
-      );
-      recordUnclassified(node, node.fleet);
-      return null;
-    }
-
-    return node.system;
-  }
-
-  // 3. No claim: fall back to the version line it is on.
-  if (fromVersion) return fromVersion;
-
-  // 4. A device flashed at the factory reports a version this server never published, so on a
-  //    brand-new fleet the version lookup places nobody. With one system there is nothing to
-  //    confuse it with and no wrong answer, so it is placed rather than parked — otherwise
-  //    standing up a fleet would mean confirming the same decision once per device. This does
-  //    NOT rescue a wrong claim above: an explicit wrong name is a fault, not a blank.
-  const sole = await soleSystem();
-  if (sole) return sole;
+  if (await findSystem(node.system)) return node.system;
 
   logger.warn(
-    `unclassified node ${node.serial ?? '(no serial)'} on ${node.version} `
-    + `(${node.platform}): no release carries that version, no system is assigned, and more `
-    + 'than one system exists; offering no update until an admin places it',
+    `node ${node.serial ?? '(no serial)'} reports system "${node.system}", which does not `
+    + 'exist here; offering no update until an admin places it or creates that system',
   );
   recordUnclassified(node, node.fleet);
   return null;
@@ -173,9 +134,9 @@ async function decide({ serial, platform, version, channelName, system }) {
   // downgrade from a stale pin.
   if (!isNewer(offered, version)) return none;
 
-  const release = await catalog.getRelease(offered);
+  const release = await catalog.getRelease(system, offered);
   if (!release) {
-    logger.error(`channel ${channelName} points at missing release ${offered}`);
+    logger.error(`channel ${system}/${channelName} points at missing release ${offered}`);
     return none;
   }
 
@@ -187,13 +148,13 @@ async function decide({ serial, platform, version, channelName, system }) {
     );
   }
 
-  let artifact = await catalog.findArtifact(offered, 'slim', platform);
+  let artifact = await catalog.findArtifact(system, offered, 'slim', platform);
   let kind = 'slim';
 
   if (!artifact && config.slimFallbackToFleet) {
     // Section 4 tells operators to publish one bundle covering every platform. Without this
     // fallback such a server answers "no update" forever for everyone.
-    const fleet = await catalog.findArtifact(offered, 'fleet');
+    const fleet = await catalog.findArtifact(system, offered, 'fleet');
     if (fleet && fleet.platforms.includes(platform)) {
       artifact = fleet;
       kind = 'fleet';
@@ -202,7 +163,7 @@ async function decide({ serial, platform, version, channelName, system }) {
 
   if (!artifact) return none;
   if (!await artifactReadable(artifact)) {
-    logger.error(`artifact file missing for ${offered}/${artifact.file}`);
+    logger.error(`artifact file missing for ${system}/${offered}/${artifact.file}`);
     return none;
   }
 

@@ -108,7 +108,7 @@ export const config = {
   // TLS
   tlsCertFile: resolve(process.env.TLS_CERT_FILE, 'tls/server.crt'),
   tlsKeyFile: resolve(process.env.TLS_KEY_FILE, 'tls/server.key'),
-  tlsCn: process.env.TLS_CN || 'aeroserver',
+  tlsCn: process.env.TLS_CN || 'aerocoreupdate',
   // Extra names/addresses to put in the certificate's subjectAltName. Anything a client will
   // actually dial has to be here, or verification fails from that address.
   tlsSan: (process.env.TLS_SAN || '').split(',').map((s) => s.trim()).filter(Boolean),
@@ -126,14 +126,8 @@ export const config = {
   apiKeys: parseApiKeys(process.env.UPDATE_API_KEYS),
 
   // Admin auth
-  jwtSecret: process.env.JWT_SECRET || '',
   accessTtlSeconds: int(process.env.ACCESS_TTL_SECONDS, 15 * 60),
   refreshTtlSeconds: int(process.env.REFRESH_TTL_SECONDS, 7 * 24 * 3600),
-  adminUsername: process.env.ADMIN_USERNAME || 'admin',
-  adminPassword: process.env.ADMIN_PASSWORD || '',
-  loginMaxFailuresPerUser: int(process.env.LOGIN_MAX_FAILURES_USER, 5),
-  loginMaxFailuresPerIp: int(process.env.LOGIN_MAX_FAILURES_IP, 20),
-  loginWindowMinutes: int(process.env.LOGIN_WINDOW_MINUTES, 15),
 
   // Signing
   keyId: process.env.SIGNING_KEY_ID || 'rtr-ota-2026',
@@ -155,7 +149,7 @@ export const config = {
   // can verify a signature the release pipeline produced, not so the server can sign.
   signingTrustedKeys: parsePublicKeys(process.env.SIGNING_TRUSTED_KEYS),
 
-  // External identity (Keycloak). One account across AeroServer, AeroCore and aerotunnel.
+  // External identity (Keycloak). One account across AeroCoreUpdate, AeroCore and aerotunnel.
   //
   // ONE realm, named ONCE: base URL + realm. The issuer and the JWKS URI are derived from
   // them below, because Keycloak's own layout fixes both — naming all four would be the
@@ -171,6 +165,54 @@ export const config = {
   // fleet API must not open the admin API, nor the reverse.
   oidcAudienceAdmin: process.env.OIDC_AUDIENCE_ADMIN || 'aeroserver-admin',
   oidcAudienceFleet: process.env.OIDC_AUDIENCE_FLEET || 'aerocore',
+  // The realm role a Keycloak account must hold to reach /admin at all.
+  //
+  // The audience says which SURFACE a token was minted for; it says nothing about what the
+  // account behind it may do. Without a role check every realm user opens every admin route —
+  // including the `customer` accounts this server creates — and with self-registration on that
+  // is anyone who can reach Keycloak.
+  //
+  // Deliberately not disableable. A realm missing this role locks every operator out of
+  // this server, which is severe and is meant to be: an unenforced role check would open
+  // the admin API to every account in a realm shared with two other products.
+  oidcAdminRole: (process.env.OIDC_ADMIN_ROLE || 'aeroserver-admin').trim(),
+  // Two lesser roles, so "may sign in to the admin API" stops meaning "may ship firmware".
+  //
+  // A publisher uploads artifacts and creates releases; only the admin role points a channel
+  // at one. That is the whole authorisation model in one sentence, and the reason it exists:
+  // an upload reaches nobody until a channel moves, so the two are different powers and the
+  // person who reviews a build need not be the person who built it.
+  //
+  // Empty disables a level rather than widening it — a name nobody holds grants nothing.
+  oidcPublisherRole: (process.env.OIDC_PUBLISHER_ROLE ?? 'aeroserver-publisher').trim(),
+  oidcViewerRole: (process.env.OIDC_VIEWER_ROLE ?? 'aeroserver-viewer').trim(),
+  // The realm role a token must hold before the FLEET API opens, checked on top of the
+  // audience. The audience says a token was minted for the nodes; it does not say the
+  // account behind it may pull firmware — and every account in a shared realm can ask
+  // Keycloak for a fleet-audience token, including the `customer` accounts this server
+  // creates and anyone who self-registers.
+  //
+  // Empty means no role check, which is the historical behaviour and stays the default: a
+  // fleet already running on tokens must not stop updating because this server was upgraded.
+  // Turning it on is a cutover like FLEET_AUTH_MODE itself — grant the role to the node
+  // service account BEFORE setting it, or every node gets 403 at once.
+  oidcFleetRole: (process.env.OIDC_FLEET_ROLE || '').trim(),
+  // A lesser fleet role: may pull, but only what the `stable` channel currently serves.
+  //
+  // The distinction is not about trust in a person, it is about which build a device should
+  // ever receive. An aircraft that follows stable has no business fetching a beta image, and
+  // a credential that cannot ask for one cannot be talked into it by a mistyped config.
+  // Holding the full role as well wins — that is a superset, not a conflict.
+  oidcFleetStableRole: (process.env.OIDC_FLEET_STABLE_ROLE ?? 'aerocore-fleet-stable').trim(),
+  // Signing in to the admin UI with a Keycloak account, from a browser.
+  //
+  // A CONFIDENTIAL client, deliberately: the code exchange happens in this process, never in
+  // the page — /admin is HTTPS-only and Keycloak is usually plain HTTP on the LAN, which a
+  // browser refuses to mix. So the secret never reaches a browser, and the page ends up with
+  // the same session it has always had. Empty leaves the sign-in page on local passwords.
+  oidcWebClientId: (process.env.OIDC_WEB_CLIENT_ID || '').trim(),
+  oidcWebClientSecret: process.env.OIDC_WEB_CLIENT_SECRET || '',
+
   // Survives a restart taken while Keycloak is unreachable. Without it a server that reboots
   // during an IdP outage cannot verify anything until the IdP is back.
   oidcJwksCacheFile: resolve(process.env.OIDC_JWKS_CACHE_FILE, 'keys/jwks-cache.json'),
@@ -190,11 +232,20 @@ export const config = {
   // privilege level, never a convenient one. Set it empty to grant nothing at all.
   keycloakDefaultRole: (process.env.KEYCLOAK_DEFAULT_ROLE ?? 'customer').trim(),
 
+  // Self-service account creation from the sign-in page, with no credential at all.
+  //
+  // OFF by default, and that default is load-bearing: an account created here is a KEYCLOAK
+  // account, so it signs in to AeroCore and aerotunnel the moment it exists. Turning this on
+  // is a decision about who may reach three systems, not one form on one page.
+  allowSelfRegistration: bool(process.env.ALLOW_SELF_REGISTRATION, false),
+  // Per-address ceiling, so an open form cannot be used to fill the realm.
+  registerMaxPerIp: int(process.env.REGISTER_MAX_PER_IP, 5),
+  registerWindowMinutes: int(process.env.REGISTER_WINDOW_MINUTES, 60),
+
   // Catalog behaviour
   publicBaseUrl: process.env.PUBLIC_BASE_URL || '',
   strictPlatforms: bool(process.env.STRICT_PLATFORMS, true),
   slimFallbackToFleet: bool(process.env.SLIM_FALLBACK_TO_FLEET, true),
-  maxFleetNodes: int(process.env.MAX_FLEET_NODES, 32),
   uploadMaxBytes: int(process.env.UPLOAD_MAX_BYTES, 512 * 1024 * 1024),
   // Where a fresh upload lands. `beta` by default, so a new build reaches the test group and
   // nothing else: stable keeps whatever it was handing out until an admin promotes.

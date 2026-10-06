@@ -80,7 +80,7 @@ describe('publishing in one action', { skip: hasDatabase ? false : SKIP_MESSAGE 
     assert.equal((await upload(body)).status, 201);
 
     const check = await server.request(
-      '/api/v1/update/check?serial=SN-AUTO&platform=linux-x86_64&version=0.13.0',
+      '/api/v1/update/check?system=default&serial=SN-AUTO&platform=linux-x86_64&version=0.13.0',
       { headers: { 'X-API-Key': 'test-fleet-key-0123456789' } },
     );
 
@@ -112,7 +112,7 @@ describe('publishing in one action', { skip: hasDatabase ? false : SKIP_MESSAGE 
     });
     assert.equal((await upload(first, 'channel=')).status, 201);
 
-    await session.api('/admin/api/releases/1.4.0', {
+    await session.api('/admin/api/systems/default/releases/1.4.0', {
       method: 'PATCH', body: JSON.stringify({ notes: 'edited by hand' }),
     });
 

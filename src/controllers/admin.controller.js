@@ -1,5 +1,5 @@
 import { readJsonBody, sendJson } from '../core/http.js';
-import { conflict, invalidParameter, notFound } from '../core/errors.js';
+import { conflict, forbidden, invalidParameter, notFound } from '../core/errors.js';
 import { config, fleetApiKeys } from '../config/index.js';
 import * as catalog from '../repositories/catalog.repository.js';
 import { artifactReadable } from '../services/download.service.js';
@@ -14,6 +14,8 @@ import { listCerts, putCert } from '../repositories/signingKeyCert.repository.js
 import { createUser, keycloakAdminConfigured, listUsers }
   from '../services/keycloakAdmin.service.js';
 import { getTlsInfo } from '../services/tlsInfo.service.js';
+import { SCOPE, mayLandOnChannel } from '../domain/scopes.js';
+import { cutSessions } from '../services/auth.service.js';
 import {
   validateArtifactMetadata, validateChannelBody, validateChannelName, validateExpectedSha256,
   validateKeyCertificateBody, validateNewUser, validatePublishedAt, validateReleaseBody,
@@ -42,7 +44,7 @@ export async function getCatalog(req, res) {
   const withArtifacts = await Promise.all(releases.map(async (release) => ({
     ...release,
     artifacts: await Promise.all(
-      (await catalog.listArtifacts(release.version)).map(async (artifact) => ({
+      (await catalog.listArtifacts(release.system, release.version)).map(async (artifact) => ({
         ...serializeArtifact(artifact),
         // Whether the bytes are actually there. A row whose file has gone is invisible from
         // every other angle: the catalog shows the release as live, the channel points at it,
@@ -89,7 +91,7 @@ export async function deleteSystem(req, res) {
   sendJson(res, 200, await catalogAdmin.deleteSystem(name, req.user.username));
 }
 
-// ── nodes the version lookup could not place ──────────────────────────────────────────────
+// ── nodes their own claim could not place ────────────────────────────────────────────────
 
 export async function listUnclassified(req, res) {
   const filter = ['pending', 'assigned', 'all'].includes(req.query.get('filter'))
@@ -104,8 +106,8 @@ export async function listUnclassified(req, res) {
 /**
  * The admin review step. Send {"system": null} to put a node back in the pending list.
  *
- * This is the only way to classify a device whose version this server never published — a
- * factory-fresh unit, or one flashed by hand. Nothing resolves itself with time.
+ * This is the only way to classify a device that names a system this server does not have —
+ * usually a mis-stamped build. Nothing resolves itself with time.
  */
 export async function assignNode(req, res) {
   const serial = validateSerial(req.params.serial);
@@ -127,25 +129,31 @@ export async function forgetNode(req, res) {
   sendJson(res, 200, { ok: true, serial });
 }
 
+// A release lives under its system: two systems may publish the same version number
+// (migration 012), so a version alone names nothing.
+
 export async function createRelease(req, res) {
+  const system = validateSystemName(req.params.system);
   const input = validateReleaseBody(await readJsonBody(req));
-  sendJson(res, 201, await catalogAdmin.createRelease(input, req.user.username));
+  sendJson(res, 201, await catalogAdmin.createRelease(system, input, req.user.username));
 }
 
 export async function updateRelease(req, res) {
+  const system = validateSystemName(req.params.system);
   const version = validateVersionParam(req.params.version);
   const changes = validateReleaseBody(await readJsonBody(req), { partial: true });
-  sendJson(res, 200, await catalogAdmin.updateRelease(version, changes, req.user.username));
+  sendJson(res, 200, await catalogAdmin.updateRelease(system, version, changes, req.user.username));
 }
 
 export async function deleteRelease(req, res) {
+  const system = validateSystemName(req.params.system);
   const version = validateVersionParam(req.params.version);
-  sendJson(res, 200, await catalogAdmin.deleteRelease(version, req.user.username));
+  sendJson(res, 200, await catalogAdmin.deleteRelease(system, version, req.user.username));
 }
 
 /**
- * POST /admin/api/artifacts                          — version comes from the bundle
- * POST /admin/api/releases/:version/artifacts        — version asserted, cross-checked
+ * POST /admin/api/artifacts                                    — all of it from the bundle
+ * POST /admin/api/systems/:system/releases/:version/artifacts  — asserted, cross-checked
  *
  * The raw body is the .tar.gz. Everything that does not depend on the version is validated
  * here, before a byte is read, so a malformed query never costs a full upload.
@@ -190,11 +198,16 @@ export async function stageUpload(req, res) {
  * promotes it, so this call takes no target.
  */
 export async function commitUpload(req, res) {
-  const { kind, platforms } = validateUploadQuery(req.query);
+  const { kind, platforms, allowRollback } = validateUploadQuery(req.query);
 
+  // Still no channel from the caller — the staging channel is hardcoded here and that is what
+  // keeps this path unable to publish. But it does move a channel, so it meets the same
+  // backward-move guard as every other path, and needs to be able to carry the answer.
   const { artifact, inspection, releaseCreated, promoted, system } = await publish.commitUpload(
     req.params.token,
-    { kind, platforms, channel: config.stagingChannel, actor: req.user.username },
+    {
+      kind, platforms, channel: config.stagingChannel, allowRollback, actor: req.user.username,
+    },
   );
 
   const diff = await diffAgainstPrevious(artifact, system);
@@ -210,9 +223,55 @@ export async function commitUpload(req, res) {
   });
 }
 
+/**
+ * Refuse an upload that asks to point a channel the caller may not move.
+ *
+ * `config.stagingChannel` and NOT `config.autoPromoteChannel`: the two hold the same value by
+ * default, but the promotion target is read from the environment, so anchoring on it would let
+ * AUTO_PROMOTE_CHANNEL=stable hand every publisher the fleet without a line of this file
+ * looking wrong. See mayLandOnChannel in domain/scopes.js.
+ */
+async function requirePublishRights(req, channel) {
+  if (mayLandOnChannel({ channel, scopes: req.user.scopes, stagingChannel: config.stagingChannel })) {
+    return;
+  }
+
+  // Recorded before the refusal, and on its own connection: the upload's transaction does not
+  // exist yet and never will. This is the one audit row in the system describing something
+  // that did NOT happen, which is the reason it is worth writing — one occurrence is a
+  // misconfigured script, a pattern of them is something else, and neither is visible if the
+  // request simply 403s into the void.
+  await insertAudit({
+    actor: req.user.username,
+    action: 'channel.denied',
+    subject: channel,
+    detail: { requested: channel, missing: SCOPE.CHANNEL_WRITE, route: 'upload' },
+  });
+
+  throw forbidden(
+    `This upload may not point "${channel}" at the release: the account lacks the `
+    + `"${SCOPE.CHANNEL_WRITE}" permission. The upload itself is allowed — send it without `
+    + `?channel=, and it will land on "${config.stagingChannel}" where an administrator can `
+    + 'review it and promote it from there.',
+  );
+}
+
 export async function uploadArtifact(req, res) {
   const version = req.params.version ? validateVersionParam(req.params.version) : null;
-  const { kind, platforms, channel } = validateUploadQuery(req.query);
+  const system = req.params.system ? validateSystemName(req.params.system) : null;
+  const { kind, platforms, channel, allowRollback } = validateUploadQuery(req.query);
+
+  // Uploading fills the catalog; pointing a channel at the result is what reaches an aircraft.
+  // This request can do both, so the second right is checked here — before a byte of the body
+  // is read, which is the whole point: the old code let a publisher past this gate and refused
+  // them later, from the bundle reader, on the contents of a build it should never have looked
+  // at.
+  //
+  // Here and not in the validator, which sees the channel but not the caller; and not in the
+  // service, which does the write but is shared with the two-step commit that hardcodes the
+  // staging channel. This is the only layer holding both halves of the question.
+  await requirePublishRights(req, channel);
+
   const expectedSha256 = validateExpectedSha256(req.headers['x-expected-sha256']);
   // Pre-signed uploads carry the signature and the published_at it was signed over; both
   // are absent on an ordinary one. See docs/ota-presigned-artifacts.md.
@@ -220,20 +279,18 @@ export async function uploadArtifact(req, res) {
   const publishedAt = validatePublishedAt(req.headers['x-published-at'],
                                           { required: Boolean(signature) });
 
-  const { artifact, inspection, releaseCreated, promoted, system } = await publish.uploadArtifact(req, {
-    version, kind, platforms, channel, expectedSha256, signature, publishedAt,
-    actor: req.user.username,
+  const { artifact, inspection, releaseCreated, promoted } = await publish.uploadArtifact(req, {
+    version, system, kind, platforms, channel, expectedSha256, signature, publishedAt,
+    allowRollback, actor: req.user.username,
   });
 
-  // Against the previous release OF THIS SYSTEM. Passing it explicitly also saves the lookup
-  // diffAgainstPrevious would otherwise do to find it.
-  const diff = await diffAgainstPrevious(artifact, system);
+  // Against the previous release OF THIS SYSTEM.
+  const diff = await diffAgainstPrevious(artifact);
 
   sendJson(res, 201, {
     ...serializeArtifact(artifact),
     release_created: releaseCreated,
     promoted_to: promoted,
-    system,
     // What promoting this would actually change. Nothing else in the system answers that: the
     // node reports a release that changes nothing exactly like one that changes everything.
     diff: { ...diff, no_op: isNoOp(diff) },
@@ -290,8 +347,6 @@ export async function getChannel(req, res) {
     name: channel.name,
     latest: channel.latest,
     updated_at: channel.updatedAt,
-    pins: Object.fromEntries(channel.pin),
-    denies: [...channel.deny],
   });
 }
 
@@ -453,6 +508,36 @@ export async function listUsersHandler(req, res) {
  * assigns one — see keycloakAdmin.service.js for why that is not optional while this
  * server's authorisation is still binary.
  */
+/**
+ * Cut an account's sessions: DELETE the sessions, not the account.
+ *
+ * Half of a demotion, and the half this server can do. Roles live in Keycloak, so removing
+ * one there is the first half; until the holder's token expires it still says what it said
+ * when it was minted, and this is what makes the removal bite immediately.
+ *
+ * Named for what it does rather than "revoke": nothing is destroyed and the account can sign
+ * in again a second later — with whatever it is entitled to THEN, which is the entire point.
+ */
+export async function revokeSessions(req, res) {
+  const username = req.params.username;
+  if (!username) throw invalidParameter('username is required');
+  if (username === req.user.username) {
+    // Cutting your own sessions by accident while cutting somebody else's is a mistake worth
+    // refusing. There is no self-service equivalent any more, so this simply says no.
+    throw invalidParameter('This cuts another account. It cannot be used on your own.');
+  }
+
+  if (!await cutSessions(username)) throw notFound(`No account "${username}" has signed in here`);
+
+  await insertAudit({ actor: req.user.username, action: 'user.cut_sessions', subject: username });
+
+  sendJson(res, 200, {
+    username,
+    note: 'Every token this account already held is refused. Roles live in Keycloak — cutting '
+      + 'sessions does not remove one, it only stops an old token from carrying it.',
+  });
+}
+
 export async function createUserHandler(req, res) {
   const input = validateNewUser(await readJsonBody(req));
   const created = await createUser(input);
@@ -479,6 +564,7 @@ export async function createUserHandler(req, res) {
 function serializeArtifact(artifact) {
   return {
     id: artifact.id,
+    system: artifact.system,
     version: artifact.version,
     kind: artifact.kind,
     platform: artifact.platform,

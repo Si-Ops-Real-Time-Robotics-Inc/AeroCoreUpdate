@@ -1,36 +1,29 @@
 import fsp from 'node:fs/promises';
-import path from 'node:path';
 
 import { withTransaction } from '../db/pool.js';
 import { conflict, invalidBundle, invalidParameter, notFound } from '../core/errors.js';
 import { logger } from '../core/logger.js';
-import { isNewer, parseVersion } from '../domain/version.js';
+import { parseVersion } from '../domain/version.js';
+import { rollbackFinding } from '../domain/channel.js';
 import * as catalog from '../repositories/catalog.repository.js';
 import { insertAudit } from '../repositories/audit.repository.js';
 import * as systems from '../repositories/system.repository.js';
 import { findSystem } from '../repositories/system.repository.js';
-import { config } from '../config/index.js';
 
 /**
  * Catalog writes. Every one of these bumps catalog_rev inside the same transaction, so a
  * a channel moving or a new upload invalidates every cached check the moment it commits.
  */
 
-export async function createRelease(input, actor) {
-  const existing = await catalog.getRelease(input.version);
-  if (existing) {
-    throw conflict(
-      `Release ${input.version} already exists`
-      + (existing.system ? ` in system "${existing.system}"` : ''),
-    );
-  }
+export async function createRelease(system, input, actor) {
+  // Never invented from a request: one made from a typo starts a release line no node ever
+  // joins. 404 because the system is the parent in the path.
+  if (!await findSystem(system)) throw notFound(`No system ${system}`);
 
-  const system = input.system ?? config.defaultSystem;
-  if (!await findSystem(system)) {
-    throw invalidParameter(
-      `No system "${system}". Create it first — systems are never invented from a request, `
-      + 'because one made from a typo starts a release line no node ever joins.',
-    );
+  // Only this system's line matters. Another system using the same number is fine — a release
+  // is (system, version) since migration 012.
+  if (await catalog.getRelease(system, input.version)) {
+    throw conflict(`Release ${input.version} already exists in system "${system}"`);
   }
 
   await withTransaction(async (client) => {
@@ -46,17 +39,18 @@ export async function createRelease(input, actor) {
       ],
     );
     await insertAudit({
-      actor, action: 'release.create', subject: input.version, detail: input,
+      actor, action: 'release.create', subject: `${system}/${input.version}`,
+      detail: { ...input, system },
     }, client);
     await catalog.bumpRevision(client);
   });
 
-  return catalog.getRelease(input.version);
+  return catalog.getRelease(system, input.version);
 }
 
-export async function updateRelease(version, changes, actor) {
-  const existing = await catalog.getRelease(version);
-  if (!existing) throw notFound(`No release ${version}`);
+export async function updateRelease(system, version, changes, actor) {
+  const existing = await catalog.getRelease(system, version);
+  if (!existing) throw notFound(`No release ${version} in system ${system}`);
 
   // min_version and published_at are two of the six fields a manifest signature covers. Once
   // an artifact of this release is pre-signed, editing either leaves the manifest carrying a
@@ -64,7 +58,7 @@ export async function updateRelease(version, changes, actor) {
   // `signature_invalid`, a symptom indistinguishable from a key problem. Refuse the edit;
   // re-sign and re-upload instead.
   if (changes.minVersion !== undefined || changes.publishedAt !== undefined) {
-    const signed = (await catalog.listArtifacts(version)).filter((a) => a.signature);
+    const signed = (await catalog.listArtifacts(system, version)).filter((a) => a.signature);
     if (signed.length) {
       throw conflict(
         `Release ${version} has pre-signed artifact(s) ${signed.map((a) => a.id).join(', ')}. `
@@ -81,69 +75,121 @@ export async function updateRelease(version, changes, actor) {
          mandatory    = COALESCE($3, mandatory),
          notes        = COALESCE($4, notes),
          published_at = COALESCE($5, published_at)
-       WHERE version = $1`,
+       WHERE system = $6 AND version = $1`,
       [
         version, changes.minVersion ?? null,
         changes.mandatory === undefined ? null : changes.mandatory,
         changes.notes ?? null,
         changes.publishedAt ? new Date(changes.publishedAt) : null,
+        system,
       ],
     );
-    await insertAudit({ actor, action: 'release.update', subject: version, detail: changes }, client);
-    await catalog.bumpRevision(client);
-  });
-
-  return catalog.getRelease(version);
-}
-
-export async function deleteRelease(version, actor) {
-  const release = await catalog.getRelease(version);
-  if (!release) throw notFound(`No release ${version}`);
-
-  const channels = await catalog.listChannels();
-  const pointing = channels.filter((channel) => channel.latest === version);
-  if (pointing.length) {
-    throw conflict(
-      `Release ${version} is the latest of: `
-      + `${pointing.map((c) => `${c.system}/${c.name}`).join(', ')}`,
-    );
-  }
-
-  const artifacts = await catalog.listArtifacts(version);
-
-  await withTransaction(async (client) => {
-    await client.query('DELETE FROM release WHERE version = $1', [version]);
     await insertAudit({
-      actor, action: 'release.delete', subject: version, detail: { artifacts: artifacts.length },
+      actor, action: 'release.update', subject: `${system}/${version}`, detail: changes,
     }, client);
     await catalog.bumpRevision(client);
   });
 
+  return catalog.getRelease(system, version);
+}
+
+export async function deleteRelease(system, version, actor) {
+  const artifacts = (await catalog.listArtifacts(system, version)).length;
+
+  // Lock, check, delete — in that order, in one transaction. The release row is locked FOR
+  // UPDATE first, which a promote's foreign-key check (FOR KEY SHARE) cannot get past; only then
+  // are the serving channels read, so no promote can land between the check and the delete.
+  // Checked outside the transaction, as this used to be, the race was real, and with
+  // channel.latest ON DELETE SET NULL losing it emptied the channel with no sign. Migration 011
+  // made that key RESTRICT, so the database refuses too; the lock is what turns the refusal into
+  // a sentence naming the channel instead of a failed statement.
+  try {
+    await withTransaction(async (client) => {
+      if (!await catalog.lockRelease(client, system, version)) {
+        throw notFound(`No release ${version} in system ${system}`);
+      }
+
+      const serving = await catalog.channelsServing(client, system, version);
+      if (serving.length) throw servedRefusal(`Release ${version} is ${latestOf(serving)}`, serving);
+
+      await catalog.deleteReleaseRow(client, system, version);
+      await insertAudit({
+        actor, action: 'release.delete', subject: `${system}/${version}`, detail: { artifacts },
+      }, client);
+      await catalog.bumpRevision(client);
+    });
+  } catch (err) {
+    // Unreachable after the lock above. Mapped anyway, so a path added later without the lock
+    // still reaches the operator as "this channel is serving it" rather than as a 500.
+    if (err?.code === FOREIGN_KEY_VIOLATION) {
+      const serving = (await catalog.listChannels(system))
+        .filter((channel) => channel.latest === version)
+        .map((channel) => `${channel.system}/${channel.name}`);
+      throw servedRefusal(`Release ${version} is ${latestOf(serving)}`, serving);
+    }
+    throw err;
+  }
+
   // Files go after the transaction commits: an orphaned file is recoverable, a database row
   // pointing at bytes that no longer exist is not.
-  await removeVersionDirectory(version);
-  return { version, artifacts: artifacts.length };
+  await removeReleaseDirectory(system, version);
+  return { system, version, artifacts };
 }
 
 export async function deleteArtifact(id, actor) {
   const artifact = await catalog.findArtifactById(id);
   if (!artifact) throw notFound(`No artifact ${id}`);
 
+  // The same lock, check and order as deleteRelease, on the release this artifact belongs to.
+  // Removing the only artifact a platform is served from tells every device on that channel
+  // there is no update, with no error anywhere — and no key runs from a channel to an artifact
+  // for the database to refuse it with, so here the lock is the whole guarantee.
   await withTransaction(async (client) => {
-    await client.query('DELETE FROM artifact WHERE id = $1', [id]);
+    if (!await catalog.lockRelease(client, artifact.system, artifact.version)) {
+      throw notFound(`No artifact ${id}`);
+    }
+
+    const serving = await catalog.channelsServing(client, artifact.system, artifact.version);
+    if (serving.length) {
+      throw servedRefusal(
+        `Artifact ${artifact.file} belongs to release ${artifact.version}, which is `
+        + latestOf(serving),
+        serving,
+      );
+    }
+
+    // Zero rows: another session removed it between the lookup above and this lock.
+    if (!await catalog.deleteArtifactRow(client, id)) throw notFound(`No artifact ${id}`);
     await insertAudit({
       actor,
       action: 'artifact.delete',
-      subject: `${artifact.version}/${artifact.file}`,
+      subject: `${artifact.system}/${artifact.version}/${artifact.file}`,
       detail: { id, kind: artifact.kind, platform: artifact.platform },
     }, client);
     await catalog.bumpRevision(client);
   });
 
-  await fsp.rm(catalog.artifactPath(artifact.version, artifact.file), { force: true })
+  await fsp.rm(catalog.artifactPath(artifact.system, artifact.version, artifact.file), { force: true })
     .catch((err) => logger.error(`could not remove artifact file ${artifact.file}`, err));
 
   return { id };
+}
+
+// Postgres foreign_key_violation. channel(system, latest) → release is RESTRICT (011, 012).
+const FOREIGN_KEY_VIOLATION = '23503';
+
+/** "the latest of: HERA/stable. Point that channel at another release first." */
+function latestOf(channels) {
+  return `the latest of: ${channels.join(', ')}. Point `
+    + `${channels.length === 1 ? 'that channel' : 'those channels'} at another release first.`;
+}
+
+/**
+ * Removing a build a channel is serving. A finding, so a caller branches on `release_in_use`
+ * and shows `channels` — current as of the lock — instead of parsing this sentence.
+ */
+function servedRefusal(message, channels) {
+  return conflict(message, [{ rule: 'release_in_use', message, channels }]);
 }
 
 /**
@@ -203,32 +249,21 @@ export async function upsertChannel(system, name, changes, actor) {
   if (!await findSystem(system)) throw notFound(`No system ${system}`);
 
   if (changes.latest) {
-    const release = await catalog.getRelease(changes.latest);
-    if (!release) throw invalidParameter(`No release ${changes.latest}`);
-    // A channel hands out one version, and a version belongs to one system. Pointing a drone
-    // channel at a GCS release would offer every drone a bundle it cannot apply.
-    if (release.system !== system) {
-      throw invalidParameter(
-        `Release ${changes.latest} belongs to system "${release.system}", not "${system}".`,
-      );
+    // Looked up in this system only. Another system may have a release with the same number,
+    // and pointing a drone channel at a GCS release would offer every drone a bundle it cannot
+    // apply — so that one simply does not exist from here.
+    if (!await catalog.getRelease(system, changes.latest)) {
+      throw invalidParameter(`No release ${changes.latest} in system "${system}"`);
     }
 
-    // Moving a channel backwards is almost always a mistyped promote, and it looks harmless
-    // because no node downgrades: decide() refuses anything not strictly newer. But a device
-    // fresh from the factory has no such protection — it takes whatever the channel points
-    // at, so the fleet quietly splits into "updated before the slip" and "provisioned after".
+    // The same guard the upload path applies, from the same function — see domain/channel.js
+    // for why it is backwards moves that matter. Carried as a finding so a caller can offer
+    // the confirmation rather than parse English prose to discover there is one.
     const current = await catalog.getChannel(system, name);
-    if (current?.latest && isNewer(current.latest, changes.latest) && !changes.allowRollback) {
-      const message =
-        `${system}/${name} is on ${current.latest}; ${changes.latest} is older. Nodes already `
-        + 'updated will not go back, but newly provisioned ones would take it. Send '
-        + '"allow_rollback": true if that is what you intend.';
-
-      // Carried as a finding so a caller can offer the confirmation rather than parse English
-      // prose to discover there is one. Same mechanism bundle inspection uses; `code` stays
-      // inside the closed enum the node branches on.
-      throw invalidBundle([{ rule: 'channel_rollback', message, from: current.latest, to: changes.latest }]);
-    }
+    const finding = changes.allowRollback
+      ? null
+      : rollbackFinding(system, name, current?.latest ?? null, changes.latest);
+    if (finding) throw invalidBundle([finding]);
   }
 
   const released = await withTransaction(async (client) => {
@@ -318,9 +353,8 @@ export async function updateSystem(name, { description }, actor) {
 }
 
 /**
- * Deleting a system is refused while any release still belongs to it. Those releases are what
- * classify every node on that line: drop the system and each of them becomes unresolvable, so
- * every device running one would go unclassified at its next check.
+ * Deleting a system is refused while any release still belongs to it: those are a version line
+ * devices are running, and deleting the system would delete the line from under them.
  */
 export async function deleteSystem(name, actor) {
   if (!await findSystem(name)) throw notFound(`No system ${name}`);
@@ -333,10 +367,7 @@ export async function deleteSystem(name, actor) {
       'SELECT count(*)::int AS n FROM release WHERE system = $1', [name],
     );
     if (rows[0].n > 0) {
-      throw conflict(
-        `System ${name} still has ${rows[0].n} release(s). Delete them first — while they `
-        + 'exist they are what identifies every node running one of them.',
-      );
+      throw conflict(`System ${name} still has ${rows[0].n} release(s). Delete them first.`);
     }
 
     const channels = await client.query('DELETE FROM channel WHERE system = $1', [name]);
@@ -348,13 +379,15 @@ export async function deleteSystem(name, actor) {
     await catalog.bumpRevision(client);
   });
 
+  // Empty by now — every release, and with it every release directory, is gone. Best effort.
+  await removeDirectory(catalog.systemDirectory(name));
   return { name, deleted: true, channels: removed };
 }
 
 /**
- * Place a node the version lookup could not. This is the admin review step: a factory-fresh
- * device reports a version this server never published, so nothing but a human decision can
- * classify it.
+ * Place a node its own claim could not. This is the admin review step: the node named a system
+ * this server does not have — usually a mis-stamped build — so nothing but a human decision
+ * can classify it.
  *
  * Bumps catalog_rev because it changes what that node is answered, and the check ETag is
  * built from the revision.
@@ -396,10 +429,12 @@ function assertCovered(artifact, platform) {
   }
 }
 
-async function removeVersionDirectory(version) {
-  const dir = path.join(config.paths.artifacts, version);
-  const root = path.resolve(config.paths.artifacts);
-  if (!path.resolve(dir).startsWith(root + path.sep)) return;
+/** catalog.releaseDirectory is what keeps this inside the artifacts root. */
+async function removeReleaseDirectory(system, version) {
+  await removeDirectory(catalog.releaseDirectory(system, version));
+}
+
+async function removeDirectory(dir) {
   await fsp.rm(dir, { recursive: true, force: true })
     .catch((err) => logger.error(`could not remove ${dir}`, err));
 }

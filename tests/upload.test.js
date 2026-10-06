@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import {
   SKIP_MESSAGE, bundle, fakeArtifact, fleetHeaders, hasDatabase, sha256Hex, signIn,
-  startServer,
+  startServer, publish,
 } from './helpers/harness.js';
 
 describe('artifact upload', { skip: hasDatabase ? false : SKIP_MESSAGE }, () => {
@@ -22,7 +22,7 @@ describe('artifact upload', { skip: hasDatabase ? false : SKIP_MESSAGE }, () => 
     session = await signIn(server);
     artifactsDir = path.join(server.dir, 'artifacts');
 
-    const res = await session.api('/admin/api/releases', {
+    const res = await session.api('/admin/api/systems/default/releases', {
       method: 'POST',
       body: JSON.stringify({ version: '0.15.0', min_version: '0.13.0', notes: 'test' }),
     });
@@ -32,7 +32,7 @@ describe('artifact upload', { skip: hasDatabase ? false : SKIP_MESSAGE }, () => 
   after(async () => { await server?.close(); });
 
   const uploadTo = (query, body, headers = {}) =>
-    session.api(`/admin/api/releases/0.15.0/artifacts?${query}`, {
+    session.api(`/admin/api/systems/default/releases/0.15.0/artifacts?${query}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/gzip', ...headers },
       body,
@@ -40,7 +40,7 @@ describe('artifact upload', { skip: hasDatabase ? false : SKIP_MESSAGE }, () => 
 
   const listVersionDir = async () => {
     try {
-      return await fsp.readdir(path.join(artifactsDir, '0.15.0'));
+      return await fsp.readdir(path.join(artifactsDir, 'default', '0.15.0'));
     } catch {
       return [];
     }
@@ -68,7 +68,7 @@ describe('artifact upload', { skip: hasDatabase ? false : SKIP_MESSAGE }, () => 
     assert.equal(core.path, 'core/linux-x86_64');
     assert.equal(core.slice_version, '0.15.0', 'the version the node will compare against');
 
-    const onDisk = await fsp.readFile(path.join(artifactsDir, '0.15.0', 'linux-x86_64.tar.gz'));
+    const onDisk = await fsp.readFile(path.join(artifactsDir, 'default', '0.15.0', 'linux-x86_64.tar.gz'));
     assert.ok(onDisk.equals(body), 'the stored bytes must be identical');
   });
 
@@ -158,7 +158,7 @@ describe('artifact upload', { skip: hasDatabase ? false : SKIP_MESSAGE }, () => 
     });
 
     const etagBefore = (await server.request(
-      '/api/v1/update/check?serial=SN-1&platform=linux-x86_64&version=0.13.0',
+      '/api/v1/update/check?system=default&serial=SN-1&platform=linux-x86_64&version=0.13.0',
       { headers: fleetHeaders() },
     )).headers.etag;
 
@@ -173,26 +173,28 @@ describe('artifact upload', { skip: hasDatabase ? false : SKIP_MESSAGE }, () => 
     assert.notEqual(afterRev, beforeRev, 'catalog_rev must advance');
 
     const etagAfter = (await server.request(
-      '/api/v1/update/check?serial=SN-1&platform=linux-x86_64&version=0.13.0',
+      '/api/v1/update/check?system=default&serial=SN-1&platform=linux-x86_64&version=0.13.0',
       { headers: fleetHeaders() },
     )).headers.etag;
     assert.notEqual(etagAfter, etagBefore, 'a stale validator must stop matching');
   });
 
   test('deleting an artifact removes its file', async () => {
-    const catalog = (await session.api('/admin/api/catalog')).json();
-    const release = catalog.releases.find((r) => r.version === '0.15.0');
-    const fleet = release.artifacts.find((a) => a.kind === 'fleet');
+    // From a release NO channel serves. This used to remove the fleet artifact of 0.15.0 — which
+    // the next test shows is a channel's latest — and expect 200: it asserted, as correct, the
+    // removal that leaves every device on that channel told there is no update. Removing from a
+    // served release is now refused; that case lives in tests/delete-build.test.js.
+    const artifact = await publish(session, { version: '0.16.0', kind: 'fleet' });
 
-    const res = await session.api(`/admin/api/artifacts/${fleet.id}`, { method: 'DELETE' });
-    assert.equal(res.status, 200);
+    const res = await session.api(`/admin/api/artifacts/${artifact.id}`, { method: 'DELETE' });
+    assert.equal(res.status, 200, res.text());
 
-    const files = await listVersionDir();
+    const files = await fsp.readdir(path.join(artifactsDir, 'default', '0.16.0')).catch(() => []);
     assert.ok(!files.includes('fleet.tar.gz'), 'the file must go with the row');
   });
 
   test('a release that is a channel latest cannot be deleted', async () => {
-    const res = await session.api('/admin/api/releases/0.15.0', { method: 'DELETE' });
+    const res = await session.api('/admin/api/systems/default/releases/0.15.0', { method: 'DELETE' });
     assert.equal(res.status, 409);
     assert.match(res.json().message, /latest/);
   });

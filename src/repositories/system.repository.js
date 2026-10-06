@@ -55,25 +55,10 @@ export async function deleteSystem(name) {
 }
 
 /**
- * Which system a node belongs to, from the version it is running.
- *
- * This is the whole classification mechanism. It works because every release belongs to
- * exactly one system and version numbers never repeat across systems, so the version a node
- * reports names its line unambiguously. Returns null for a version this server never
- * published — a factory-fresh or hand-flashed device.
- */
-export async function systemForVersion(version) {
-  const { rows } = await query('SELECT system FROM release WHERE version = $1', [version]);
-  return rows[0]?.system ?? null;
-}
-
-/**
  * The one system, when there is exactly one.
  *
- * The reason an unplaceable node is refused an update is that guessing could push drone
- * firmware to a GCS. With a single system there is nothing to confuse it with, so there is no
- * wrong answer and no reason to make an operator confirm 500 identical decisions. The review
- * queue starts existing the moment a second system does.
+ * Where a bundle that names no system goes. With a single system there is nothing to confuse
+ * it with and no wrong answer, so nobody is asked to choose.
  */
 export async function soleSystem() {
   const { rows } = await query('SELECT name FROM system LIMIT 2');
@@ -81,7 +66,7 @@ export async function soleSystem() {
 }
 
 /**
- * The admin's answer for a node the version lookup could not place.
+ * The admin's answer for a node that could not be placed by what it reported.
  *
  * Read on every check for a node that has one, so it is a single indexed lookup by primary
  * key. Returns null for the overwhelming majority of nodes, which have no assignment at all.

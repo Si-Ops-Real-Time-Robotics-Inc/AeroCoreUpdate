@@ -32,11 +32,18 @@ export function validateCheckQuery(query) {
   // distinguish anything. It still means something in the fleet form below, where one entry
   // really is the GCS and the others are not. A node that still sends it is ignored rather
   // than refused: devices in the field keep the parameter until they are rebuilt.
+  // Required, since migration 012 let two systems publish the same version: the number a node
+  // runs no longer says which product it is, so a node that does not say is not answerable.
+  // A build that was never stamped omits the parameter — it is refused here, by name, rather
+  // than answered "no update" forever with nothing on the device saying why.
+  const system = parseSystem(query.get('system'), 'system');
+  if (!system) throw missingParameter('system');
+
   return {
     serial,
     platform,
     version,
-    system: parseSystem(query.get('system'), 'system'),
+    system,
     channel,
     plugins: parsePluginList(query.get('plugins')),
   };
@@ -45,8 +52,8 @@ export function validateCheckQuery(query) {
 /**
  * The system a node claims to be, from its own manifest.
  *
- * Absent and blank are the same thing: a build that was not stamped omits the parameter
- * entirely, so treating an empty value as an error would refuse a fleet that is merely older.
+ * Absent and blank are the same thing, and both come back as null — whether that is acceptable
+ * is the caller's decision, not this parser's.
  *
  * A name this server does not have is NOT rejected here. That is a placement decision, not a
  * malformed request — the node is reporting a fact about itself, and the server answers by

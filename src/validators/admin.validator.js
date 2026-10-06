@@ -14,29 +14,19 @@ export function validateVersionParam(raw) {
 export function validateReleaseBody(body, { partial = false } = {}) {
   if (!body || typeof body !== 'object') throw missingParameter('body');
 
-  const out = {};
-  if (!partial) {
-    out.version = validateVersionParam(body.version);
-    // Which kind of device this release is for. Omitted means the default system, so an
-    // installation that only ever ships one thing never has to think about it.
-    if (body.system !== undefined && body.system !== null) {
-      out.system = validateSystemName(body.system);
-    }
-  } else if (body.system !== undefined) {
-    // Moving a release between systems would re-classify every node reporting that version,
-    // in both directions at once. Delete and re-publish instead.
-    throw invalidParameter(
-      'a release cannot change system: the version is what identifies a node\'s system, so '
-      + 'moving it would silently re-classify every device running it',
-    );
+  // The system is the parent in the path (/systems/:system/releases), never the body. Refused
+  // rather than ignored: on a PATCH it would read as moving a release to another system, which
+  // is not an edit but a delete and a re-publish — the bytes were stamped for the old one.
+  if (body.system !== undefined) {
+    throw invalidParameter('system is taken from the path, /systems/{system}/releases');
   }
+
+  const out = {};
+  if (!partial) out.version = validateVersionParam(body.version);
 
   if (body.min_version !== undefined && body.min_version !== null) {
     if (!isValidVersion(body.min_version)) throw invalidParameter(`min_version is invalid: ${body.min_version}`);
     out.minVersion = body.min_version;
-  }
-  if (body.system !== undefined && body.system !== null) {
-    out.system = validateSystemName(body.system);
   }
   if (body.mandatory !== undefined) out.mandatory = Boolean(body.mandatory);
   if (body.notes !== undefined && body.notes !== null) {
@@ -78,7 +68,19 @@ export function validateUploadQuery(query) {
     ? config.autoPromoteChannel
     : (rawChannel === '' ? '' : validateChannelName(rawChannel));
 
-  return { kind: rawKind || null, platforms: [...new Set(platforms)], channel: channel || null };
+  // Parsing, not authorisation: the validator still knows nothing about who is asking. The
+  // upload's body is the bundle, so this arrives as a query parameter where the promote
+  // endpoint takes it in the JSON body — same name, so one refusal message serves both.
+  const allowRollback = ['1', 'true', 'yes', ''].includes(
+    (query.get('allow_rollback') ?? 'no').trim().toLowerCase(),
+  );
+
+  return {
+    kind: rawKind || null,
+    platforms: [...new Set(platforms)],
+    channel: channel || null,
+    allowRollback,
+  };
 }
 
 export function validateExpectedSha256(header) {

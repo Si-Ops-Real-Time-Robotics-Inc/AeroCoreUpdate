@@ -141,6 +141,23 @@ export async function initOidc() {
 
 const decodeSegment = (segment) => JSON.parse(Buffer.from(segment, 'base64url').toString('utf8'));
 
+/**
+ * The realm roles a token carries.
+ *
+ * Keycloak puts realm roles in `realm_access.roles` and client roles under `resource_access`.
+ * Only realm roles are read, because that is also where KEYCLOAK_DEFAULT_ROLE puts `customer`
+ * — one place to grant, one place to look. Both surfaces authorise from this one list, so
+ * the claim is decoded in one place rather than once per middleware.
+ *
+ * A realm that emits no `realm_access` at all is the case worth knowing about: a client scope
+ * named `roles` is what puts it in the token, and a realm trimmed to `basic`/`profile`/`email`
+ * has none — every account then looks role-less no matter what was granted in Keycloak.
+ */
+export function realmRoles(claims) {
+  const roles = claims?.realm_access?.roles;
+  return Array.isArray(roles) ? roles : [];
+}
+
 /** `aud` is a string or an array; treat both the same way. */
 function audienceMatches(claims, expected) {
   const aud = claims.aud;

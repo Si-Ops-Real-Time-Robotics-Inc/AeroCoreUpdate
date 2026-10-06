@@ -7,25 +7,28 @@ import { validateCheckQuery } from '../src/validators/update.validator.js';
  * The `system` parameter, which the node has been sending all along.
  *
  * `UpdateClient::check` appends `&system=` whenever the build stamped one, and omits the
- * parameter entirely when it did not. Both are normal traffic from a healthy fleet, so the
- * boundary this file guards is: absent and blank must behave identically, and a name this
- * server does not have must NOT be refused here — that is a placement decision made later,
- * not a malformed request.
+ * parameter entirely when it did not. Since two systems may publish the same version number
+ * (migration 012), a node that does not say which product it is cannot be answered, so the
+ * boundary this file guards is: absent and blank are refused identically, by name, and a name
+ * this server does not have must NOT be refused here — that is a placement decision made
+ * later, not a malformed request.
  */
 
 const query = (extra = {}) => new URLSearchParams({
   serial: 'SN-42', platform: 'linux-x86_64', version: '0.13.4', ...extra,
 });
 
-test('an unstamped build omits system, and that is not an error', () => {
-  assert.equal(validateCheckQuery(query()).system, null);
+const missingSystem = (err) => err.code === 'missing_parameter' && /system/.test(err.message);
+
+test('an unstamped build omits system, and is refused by name', () => {
+  assert.throws(() => validateCheckQuery(query()), missingSystem);
 });
 
 test('a blank system is the same as none', () => {
-  // A build could stamp an empty string; the node would send `&system=`. Refusing it would
-  // fail a check over something that says nothing either way.
-  assert.equal(validateCheckQuery(query({ system: '' })).system, null);
-  assert.equal(validateCheckQuery(query({ system: '   ' })).system, null);
+  // A build could stamp an empty string; the node would send `&system=`. It says nothing,
+  // so it is refused the same way as saying nothing — not as a malformed name.
+  assert.throws(() => validateCheckQuery(query({ system: '' })), missingSystem);
+  assert.throws(() => validateCheckQuery(query({ system: '   ' })), missingSystem);
 });
 
 test('a system name is trimmed and passed through', () => {
@@ -67,7 +70,7 @@ test('role is accepted and ignored, not refused', () => {
   // The node hardcoded it, so it distinguished nothing and the protocol dropped it. Devices in
   // the field keep sending it until they are rebuilt, and refusing them over a field the
   // server does not read would take a working fleet offline.
-  const parsed = validateCheckQuery(query({ role: 'ANYTHING' }));
+  const parsed = validateCheckQuery(query({ role: 'ANYTHING', system: 'HERA' }));
 
   assert.equal(parsed.role, undefined, 'not carried forward');
   assert.equal(parsed.serial, 'SN-42', 'and the rest of the request is unaffected');

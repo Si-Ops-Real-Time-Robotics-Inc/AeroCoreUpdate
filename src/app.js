@@ -1,5 +1,6 @@
 import { config } from './config/index.js';
 import { compose } from './core/http.js';
+import { adminCsp } from './core/csp.js';
 import { invalidParameter, maintenance } from './core/errors.js';
 import { apiRoutes } from './routes/index.js';
 import { requestLogger } from './middlewares/logger.js';
@@ -22,7 +23,7 @@ export function createApp() {
     maintenanceGate(),
     apiRoutes.middleware(),
     rootRedirect(),
-    staticFiles(config.paths.public),
+    staticFiles(config.paths.public, { spa: { prefix: '/admin/', index: 'admin/index.html' } }),
     notFoundHandler(),
   ]);
 
@@ -77,11 +78,7 @@ function securityHeaders() {
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('X-Frame-Options', 'DENY');
       res.setHeader('Referrer-Policy', 'no-referrer');
-      res.setHeader(
-        'Content-Security-Policy',
-        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
-        + "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-      );
+      res.setHeader('Content-Security-Policy', adminCsp(config.oidcIssuer));
     }
     await next();
   };

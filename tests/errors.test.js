@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   HttpError, invalidApiKey, invalidParameter, maintenance, methodNotAllowed, missingParameter,
-  notFound, rangeNotSatisfiable, rateLimited, serverError, upgradeRequired,
+  notFound, rangeNotSatisfiable, rateLimited, serverError, upgradeRequired, upstreamUnavailable,
 } from '../src/core/errors.js';
 
 /** The closed enum from spec section 1. Nothing may invent a code outside it. */
@@ -24,6 +24,7 @@ test('every factory produces a status and a documented code', () => {
     [rateLimited(60), 429, 'rate_limited'],
     [serverError(), 500, 'server_error'],
     [maintenance(300), 503, 'maintenance'],
+    [upstreamUnavailable(), 503, 'maintenance'],
   ];
 
   for (const [err, status, code] of cases) {

@@ -11,18 +11,45 @@
       <h1>AeroCore Update Server</h1>
       <p class="sub">Administrator sign-in</p>
 
-      <form id="login-form" autocomplete="on">
-        <label for="username">Username</label>
-        <input id="username" name="username" autocomplete="username" required autofocus />
+      <!--
+        The only way in. This server holds no account of its own, so when the identity
+        provider is unreachable there is nothing else to offer — login.js says so rather
+        than leaving the page blank.
+      -->
+      <div id="oidc-block" hidden>
+        <a class="button block" id="oidc-signin" href="/admin/api/auth/oidc/start">
+          Sign in with Keycloak
+        </a>
+      </div>
 
-        <label for="password">Password</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required />
+      <!-- Shown only when the server answers that sign-ups are open; see login.js. -->
+      <form id="register-form" autocomplete="on" hidden>
+        <label for="r-username">Username</label>
+        <input id="r-username" name="username" autocomplete="username" required />
 
-        <button type="submit" id="submit">Sign in</button>
+        <label for="r-email">Email (optional)</label>
+        <input id="r-email" name="email" type="email" autocomplete="email" />
+
+        <label for="r-password">Password</label>
+        <input
+          id="r-password" name="password" type="password"
+          autocomplete="new-password" minlength="8" required
+        />
+
+        <button type="submit" id="r-submit">Create account</button>
       </form>
 
       <p id="error" class="error" hidden></p>
-      <p class="hint">Fleet nodes authenticate with an API key and never use this form.</p>
+      <p id="notice" class="hint" hidden></p>
+
+      <p id="to-register" class="hint" hidden>
+        No account yet? <a href="#" id="show-register">Create one</a>
+      </p>
+      <p id="to-login" class="hint" hidden>
+        Already have an account? <a href="#" id="show-login">Sign in</a>
+      </p>
+
+      <p class="hint">Fleet nodes authenticate with a token of their own and never use this page.</p>
     </main>
 
     <script type="module" src="/admin/login.js"></script>

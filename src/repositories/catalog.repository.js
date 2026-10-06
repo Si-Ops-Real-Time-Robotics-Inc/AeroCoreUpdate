@@ -54,10 +54,11 @@ export async function listChannels(system = null) {
   }));
 }
 
-export async function getRelease(version) {
+/** A version names a release only together with its system (migration 012). */
+export async function getRelease(system, version) {
   const { rows } = await query(
     `SELECT version, system, min_version, mandatory, notes, published_at, created_at, created_by
-     FROM release WHERE version = $1`, [version],
+     FROM release WHERE system = $1 AND version = $2`, [system, version],
   );
   return rows[0] ? mapRelease(rows[0]) : null;
 }
@@ -68,7 +69,7 @@ export async function listReleases({ limit = 100, offset = 0, system = null } = 
     `SELECT version, system, min_version, mandatory, notes, published_at, created_at, created_by
      FROM release
      WHERE $3::text IS NULL OR system = $3
-     ORDER BY version_key DESC LIMIT $1 OFFSET $2`, [limit, offset, system],
+     ORDER BY version_key DESC, system LIMIT $1 OFFSET $2`, [limit, offset, system],
   );
   return rows.map(mapRelease);
 }
@@ -77,11 +78,11 @@ export async function listReleases({ limit = 100, offset = 0, system = null } = 
  * Load one artifact with its plugin and config metadata attached.
  * `kind` is 'fleet' (platform must be null) or 'slim' (platform required).
  */
-export async function findArtifact(version, kind, platform = null) {
+export async function findArtifact(system, version, kind, platform = null) {
   const { rows } = await query(
     `SELECT * FROM artifact
-     WHERE version = $1 AND kind = $2 AND platform IS NOT DISTINCT FROM $3`,
-    [version, kind, platform],
+     WHERE system = $1 AND version = $2 AND kind = $3 AND platform IS NOT DISTINCT FROM $4`,
+    [system, version, kind, platform],
   );
   if (!rows[0]) return null;
   return hydrate(rows[0]);
@@ -130,7 +131,7 @@ export async function configParamsBetween(afterVersion, beforeVersion, system) {
   const { rows } = await query(
     `SELECT r.version, ac.platform, ac.target, ac.param, ac.value
      FROM release r
-     JOIN artifact a  ON a.version = r.version
+     JOIN artifact a  ON a.system = r.system AND a.version = r.version
      JOIN artifact_config ac ON ac.artifact_id = a.id
      WHERE r.system = $3
        AND ($1::int[] IS NULL OR r.version_key > $1)
@@ -153,9 +154,10 @@ export async function findArtifactById(id) {
   return rows[0] ? hydrate(rows[0]) : null;
 }
 
-export async function listArtifacts(version) {
+export async function listArtifacts(system, version) {
   const { rows } = await query(
-    'SELECT * FROM artifact WHERE version = $1 ORDER BY kind, platform', [version],
+    'SELECT * FROM artifact WHERE system = $1 AND version = $2 ORDER BY kind, platform',
+    [system, version],
   );
   return Promise.all(rows.map(hydrate));
 }
@@ -195,6 +197,7 @@ async function hydrate(row) {
 
   return {
     id: Number(row.id),
+    system: row.system,
     version: row.version,
     kind: row.kind,
     platform: row.platform,
@@ -234,12 +237,22 @@ export function toRfc3339(value) {
 }
 
 /**
- * Versions a node can actually be handed: what each channel points at. Anything else sits in
- * the catalog unreachable — staged, not published.
+ * Every version some channel of this system currently points at — what "published" means here.
+ * Anything else sits in the catalog unreachable: staged, not published.
+ *
+ * Per system, because a number no longer names one release: HERAHUB/stable serving 0.2.0 says
+ * nothing about whether HERA's 0.2.0 is published.
+ *
+ * `names` narrows it to particular channels, which is how a credential restricted to stable
+ * is stopped from fetching a beta build by version number. Omitted, it answers for all of
+ * them, which is what the global DOWNLOAD_REQUIRES_CHANNEL gate asks.
  */
-export async function reachableVersions() {
-  const channels = await listChannels();
-  return new Set(channels.map((channel) => channel.latest).filter(Boolean));
+export async function reachableVersions(system, { names = null } = {}) {
+  const channels = await listChannels(system);
+  return new Set(channels
+    .filter((channel) => !names || names.includes(channel.name))
+    .map((channel) => channel.latest)
+    .filter(Boolean));
 }
 
 export function versionKey(version) {
@@ -247,16 +260,102 @@ export function versionKey(version) {
 }
 
 /**
- * Absolute path of an artifact file, guarded against traversal. The router's `:version`
- * pattern happily matches `..%2f..%2fpackage.json`, and decodeURIComponent turns the escapes
- * back into separators, so this check is what stops it.
+ * Absolute path of an artifact file: <root>/<system>/<version>/<file>.
+ *
+ * The system is a directory of its own because two systems may now publish the same version
+ * number, and under the old <root>/<version>/ layout the second upload would have renamed its
+ * bytes over the first's.
+ *
+ * Guarded against traversal. The router's `:version` pattern happily matches
+ * `..%2f..%2fpackage.json`, and decodeURIComponent turns the escapes back into separators, so
+ * this check is what stops it.
  */
-export function artifactPath(version, file) {
-  if (!VERSION_RE.test(version)) throw invalidParameter(`Invalid version: ${version}`);
-  if (!file || path.basename(file) !== file) throw invalidParameter(`Invalid artifact file: ${file}`);
+export function artifactPath(system, version, file) {
+  return path.join(releaseDirectory(system, version), checkedSegment(file, 'artifact file'));
+}
 
+/** <root>/<system>/<version>, the directory holding one release's files. */
+export function releaseDirectory(system, version) {
+  if (!VERSION_RE.test(version)) throw invalidParameter(`Invalid version: ${version}`);
+  return path.join(systemDirectory(system), version);
+}
+
+/** <root>/<system>. */
+export function systemDirectory(system) {
   const root = config.paths.artifacts;
-  const full = path.resolve(root, version, file);
+  const full = path.resolve(root, checkedSegment(system, 'system'));
   if (!full.startsWith(root + path.sep)) throw invalidParameter('Artifact path escapes the root');
   return full;
+}
+
+/**
+ * Where an artifact lived before migration 012 — <root>/<version>/<file>. Read only by the
+ * one-time move into the per-system layout.
+ */
+export function legacyArtifactPath(version, file) {
+  if (!VERSION_RE.test(version)) throw invalidParameter(`Invalid version: ${version}`);
+  const root = config.paths.artifacts;
+  const full = path.resolve(root, version, checkedSegment(file, 'artifact file'));
+  if (!full.startsWith(root + path.sep)) throw invalidParameter('Artifact path escapes the root');
+  return full;
+}
+
+/** One path segment, never a separator or a dot-name that would climb out of its parent. */
+function checkedSegment(value, what) {
+  if (!value || path.basename(value) !== value || value === '.' || value === '..') {
+    throw invalidParameter(`Invalid ${what}: ${value}`);
+  }
+  return value;
+}
+
+/** Every artifact row, for the one-time move into the per-system layout. */
+export async function listAllArtifactFiles() {
+  const { rows } = await query('SELECT system, version, file FROM artifact');
+  return rows;
+}
+
+// ── removal (feature 005) ─────────────────────────────────────────────────────────────────
+//
+// These take the transaction's client and are used in one order: lockRelease, then
+// channelsServing, then a delete. That order is the guarantee that a removal cannot empty a
+// channel — see lockRelease.
+
+/**
+ * Lock one release row for the rest of the transaction, or null if it is gone.
+ *
+ * FOR UPDATE, not a plain read. Every path that points a channel at a release — the promote's
+ * UPDATE and an upload's INSERT … ON CONFLICT — runs a foreign-key check that takes FOR KEY
+ * SHARE on this row, and FOR UPDATE conflicts with it. Once this returns, no promote can land on
+ * this release until the transaction ends; one that committed before is visible to the next
+ * statement, because READ COMMITTED gives every statement a fresh snapshot.
+ */
+export async function lockRelease(client, system, version) {
+  const { rows } = await client.query(
+    'SELECT version, system FROM release WHERE system = $1 AND version = $2 FOR UPDATE',
+    [system, version],
+  );
+  return rows[0] ?? null;
+}
+
+/** Every channel serving this release, as `system/name`, in a stable order. */
+export async function channelsServing(client, system, version) {
+  const { rows } = await client.query(
+    'SELECT system, name FROM channel WHERE system = $1 AND latest = $2 ORDER BY name',
+    [system, version],
+  );
+  return rows.map((row) => `${row.system}/${row.name}`);
+}
+
+/** Delete one release; its artifacts go with it (ON DELETE CASCADE). Returns rows deleted. */
+export async function deleteReleaseRow(client, system, version) {
+  const { rowCount } = await client.query(
+    'DELETE FROM release WHERE system = $1 AND version = $2', [system, version],
+  );
+  return rowCount;
+}
+
+/** Delete one artifact row. Returns rows deleted: 0 means someone else got there first. */
+export async function deleteArtifactRow(client, id) {
+  const { rowCount } = await client.query('DELETE FROM artifact WHERE id = $1', [id]);
+  return rowCount;
 }

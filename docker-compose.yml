@@ -1,51 +1,65 @@
-name: aeroserver
+name: aerocoreupdate
 
 volumes:
   pgdata:
-    name: aeroserver-pgdata     # persistent: catalog, reports, audit, admin accounts
+    name: aerocoreupdate-pgdata     # persistent: catalog, reports, audit, admin accounts
   data:
-    name: aeroserver-data       # persistent: artifacts, OTA signing key, TLS material
+    name: aerocoreupdate-data       # persistent: artifacts, OTA signing key, TLS material
 
 networks:
-  aeroserver:
-    name: aeroserver
+  aerocoreupdate:
+    name: aerocoreupdate
 
 services:
   db:
     image: postgres:17-alpine
-    container_name: aeroserver-db
-    networks: [aeroserver]
+    container_name: aerocoreupdate-db
+    networks: [aerocoreupdate]
     volumes:
       - pgdata:/var/lib/postgresql/data
     environment:
-      POSTGRES_DB: aeroserver
-      POSTGRES_USER: aeroserver
+      POSTGRES_DB: aerocoreupdate
+      POSTGRES_USER: aerocoreupdate
       # `:?` refuses to start rather than running with an empty password.
       POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U aeroserver -d aeroserver"]
+      test: ["CMD-SHELL", "pg_isready -U aerocoreupdate -d aerocoreupdate"]
       interval: 5s
       timeout: 5s
       retries: 10
     restart: unless-stopped
 
-  aeroserver:
-    build: .
-    image: aeroserver:latest
-    container_name: aeroserver
-    networks: [aeroserver]
+  aerocoreupdate:
+    build:
+      context: .
+      args:
+        # Baked into the admin UI bundle at build time. This is the issuer the
+        # BROWSER dials, which is not always the one this server dials: behind
+        # proxy_alpha's gateway the public URL and the internal one differ, and
+        # the browser can only use the public one. Empty builds a UI that offers
+        # the local break-glass account only.
+        VITE_OIDC_ISSUER: ${WEBUI_OIDC_ISSUER:-}
+        VITE_OIDC_CLIENT_ID: ${WEBUI_OIDC_CLIENT_ID:-aeroserver-webui}
+    image: aerocoreupdate:latest
+    container_name: aerocoreupdate
+    networks: [aerocoreupdate]
     depends_on:
       db:
         condition: service_healthy
     volumes:
       - data:/data
+    # Keycloak is reached by the same name inside and out, so the token's `iss` and the address
+    # this container dials agree. A container cannot resolve mDNS (`.local`) names, though, so
+    # the name is pinned to the Docker host here, where Keycloak publishes its port.
+    extra_hosts:
+      - "${KEYCLOAK_HOST:-host.docker.internal}:host-gateway"
     ports:
       - "9443:9443"             # HTTPS: fleet API and admin UI
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgres://aeroserver:${DB_PASSWORD}@db:5432/aeroserver
+      DATABASE_URL: postgres://aerocoreupdate:${DB_PASSWORD}@db:5432/aerocoreupdate
       PORT: "9443"
-      TLS_CN: ${TLS_CN:-aeroserver}
+      TLS_CN: ${TLS_CN:-aerocoreupdate}
       # Every address a client dials from outside this host. A certificate that does not name
       # the address fails verification there — the usual reason the UI works on localhost only.
       TLS_SAN: ${TLS_SAN:-}
@@ -63,13 +77,66 @@ services:
       # Serve only versions a channel points at; see README before turning this on.
       DOWNLOAD_REQUIRES_CHANNEL: ${DOWNLOAD_REQUIRES_CHANNEL:-0}
 
-      UPDATE_API_KEYS: ${UPDATE_API_KEYS:?set UPDATE_API_KEYS in .env}
-      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
-      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
-      # Leave empty to have a password generated and printed once at first boot.
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # No `:?` — under FLEET_AUTH_MODE=jwt nothing ever reads this, so demanding one would be
+      # asking for a secret to satisfy a check rather than a purpose. server.js still refuses
+      # to start without it on `apikey` and `both`, which is where it actually authenticates.
+      UPDATE_API_KEYS: ${UPDATE_API_KEYS:-}
+
+      # Keycloak. Empty leaves the admin surface with NO way in at all — oidcConfigured()
+      # is false and the OIDC path never runs. Issuer and JWKS URI derive from these two.
+      KEYCLOAK_BASE_URL: ${KEYCLOAK_BASE_URL:-}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-}
+      # Checked per surface and deliberately different: a fleet token must not open /admin.
+      OIDC_AUDIENCE_ADMIN: ${OIDC_AUDIENCE_ADMIN:-aeroserver-admin}
+      OIDC_AUDIENCE_FLEET: ${OIDC_AUDIENCE_FLEET:-aerocore}
+      # The realm role a Keycloak account must hold to reach /admin. The audience says which
+      # surface a token is for; this says whether the account behind it may publish firmware.
+      OIDC_ADMIN_ROLE: ${OIDC_ADMIN_ROLE:-aeroserver-admin}
+      # Two lesser roles: a publisher uploads artifacts and creates releases, a viewer only
+      # reads. Neither may move a channel — that stays with the admin role, which is what
+      # makes "engineer uploads, admin approves" a rule rather than an agreement.
+      OIDC_PUBLISHER_ROLE: ${OIDC_PUBLISHER_ROLE-aeroserver-publisher}
+      OIDC_VIEWER_ROLE: ${OIDC_VIEWER_ROLE-aeroserver-viewer}
+      # The same idea one surface down: the realm role a token must hold to use the FLEET
+      # API. Empty leaves the audience as the only gate, which is how this server has always
+      # behaved. Grant the role to the node service account BEFORE setting it.
+      OIDC_FLEET_ROLE: ${OIDC_FLEET_ROLE:-}
+      # The lesser one: may pull, but only what `stable` currently serves. An aircraft that
+      # follows stable should not be able to fetch a beta image even by version number.
+      OIDC_FLEET_STABLE_ROLE: ${OIDC_FLEET_STABLE_ROLE-aerocore-fleet-stable}
+      # "Sign in with Keycloak" on the admin page. A confidential client: the browser never
+      # sees the secret because the code exchange happens in the server, which is also the
+      # only way it can work at all — /admin is HTTPS and Keycloak is usually HTTP, and no
+      # browser will let one fetch the other.
+      OIDC_WEB_CLIENT_ID: ${OIDC_WEB_CLIENT_ID:-}
+      OIDC_WEB_CLIENT_SECRET: ${OIDC_WEB_CLIENT_SECRET:-}
+      # On the data volume, not in the image: the cache exists to survive a restart taken
+      # while Keycloak is unreachable, which a path under /app would not.
+      OIDC_JWKS_CACHE_FILE: ${OIDC_JWKS_CACHE_FILE:-/data/jwks-cache.json}
+      # Split-horizon only: the `iss` a token carries is the PUBLIC URL while this server
+      # dials Keycloak on an internal address. Leave empty otherwise.
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_JWKS_URI: ${OIDC_JWKS_URI:-}
+      # apikey | both | jwt. `jwt` is a cutover — every node must already hold a token.
+      FLEET_AUTH_MODE: ${FLEET_AUTH_MODE:-apikey}
+      # Creating accounts from the admin UI. The service account behind these holds
+      # `manage-users` + `view-realm` and nothing more — never `realm-admin`.
+      KEYCLOAK_ADMIN_CLIENT_ID: ${KEYCLOAK_ADMIN_CLIENT_ID:-}
+      KEYCLOAK_ADMIN_CLIENT_SECRET: ${KEYCLOAK_ADMIN_CLIENT_SECRET:-}
+      # `-` not `:-`: an explicitly empty value means "grant no role at all".
+      KEYCLOAK_DEFAULT_ROLE: ${KEYCLOAK_DEFAULT_ROLE-customer}
+      # Sign-ups from the login page, with no credential presented. OFF by default: an account
+      # created here is a Keycloak account, so it reaches AeroCore and aerotunnel too.
+      ALLOW_SELF_REGISTRATION: ${ALLOW_SELF_REGISTRATION:-0}
+      REGISTER_MAX_PER_IP: ${REGISTER_MAX_PER_IP:-5}
+      REGISTER_WINDOW_MINUTES: ${REGISTER_WINDOW_MINUTES:-60}
 
       SIGNING_KEY_ID: ${SIGNING_KEY_ID:-rtr-ota-2026}
+      # Mint a signing key when the file is absent. Safe ONLY while no node holds the previous
+      # key: a regenerated key keeps the same key_id, so every deployed node would reject this
+      # server's manifests with signature_invalid and nothing would say why. Default off — a
+      # real deployment restores from backup instead.
+      SIGNING_KEY_AUTOGEN: ${SIGNING_KEY_AUTOGEN:-0}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       UPLOAD_MAX_BYTES: ${UPLOAD_MAX_BYTES:-536870912}
       CHECK_LOG_RETENTION_DAYS: ${CHECK_LOG_RETENTION_DAYS:-90}

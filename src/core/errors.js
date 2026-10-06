@@ -45,8 +45,13 @@ export const notFound = (message = 'Not found') =>
 export const methodNotAllowed = (message = 'Method not allowed', allow = '') =>
   new HttpError(405, 'not_found', message, { headers: allow ? { Allow: allow } : {} });
 
-export const conflict = (message = 'Already exists') =>
-  new HttpError(409, 'invalid_parameter', message);
+/**
+ * 409. `details` is for a conflict the caller has to act on rather than just read — a served
+ * release that cannot be removed until its channel moves. It carries a `rule` to branch on for
+ * the same reason invalidBundle carries findings: the message is prose and may be reworded.
+ */
+export const conflict = (message = 'Already exists', details = null) =>
+  new HttpError(409, 'invalid_parameter', message, { details });
 
 export const payloadTooLarge = (message = 'Payload too large') =>
   new HttpError(413, 'invalid_parameter', message);
@@ -74,5 +79,21 @@ export const serverError = (message = 'Internal server error') =>
 
 export const maintenance = (retryAfterSeconds) =>
   new HttpError(503, 'maintenance', 'Temporarily unavailable', {
+    headers: { 'Retry-After': String(retryAfterSeconds) },
+  });
+
+/**
+ * A service this server depends on is down or misconfigured — the identity provider, today.
+ *
+ * 503 and not 500: nothing here failed, and the difference matters to whoever is looking. A
+ * 500 says "this server is broken, file a bug"; this says "come back, or tell an operator".
+ * Reuses the `maintenance` code because it is the closest thing in the closed enum and means
+ * the same to a caller: unavailable, retry later.
+ *
+ * The message is deliberately incurious. On the self-service path the caller is anonymous,
+ * so the diagnosis belongs in the server log, never in the response.
+ */
+export const upstreamUnavailable = (message = 'A required service is unavailable', retryAfterSeconds = 30) =>
+  new HttpError(503, 'maintenance', message, {
     headers: { 'Retry-After': String(retryAfterSeconds) },
   });

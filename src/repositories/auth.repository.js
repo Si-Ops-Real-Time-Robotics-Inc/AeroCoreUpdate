@@ -1,168 +1,87 @@
 import { query, withTransaction } from '../db/pool.js';
 
-/** Admin accounts, refresh tokens and login attempts. Only this module touches those tables. */
-
-export async function findUserByUsername(username) {
-  const { rows } = await query(
-    `SELECT id, username, password_hash, disabled, created_at, last_login_at, password_changed_at
-     FROM admin_user WHERE username = $1`, [username],
-  );
-  return rows[0] ? mapUser(rows[0]) : null;
-}
-
-export async function findUserById(id) {
-  const { rows } = await query(
-    `SELECT id, username, password_hash, disabled, created_at, last_login_at, password_changed_at
-     FROM admin_user WHERE id = $1`, [id],
-  );
-  return rows[0] ? mapUser(rows[0]) : null;
-}
-
-export async function countUsers() {
-  const { rows } = await query('SELECT count(*)::int AS n FROM admin_user');
-  return rows[0].n;
-}
-
 /**
  * The local row standing in for an externally-authenticated user, created on first sign-in.
  *
- * Everything here refers to an admin by the integer `admin_user.id` — refresh_token.user_id,
- * audit actors, artifact uploaded_by. Keycloak's `sub` is a UUID, so rather than rewrite all
- * of that, an external identity gets a local row keyed to its subject.
+ * Everything here refers to an admin by the integer `admin_user.id` — audit actors,
+ * artifact uploaded_by. Keycloak's `sub` is a UUID, so rather than rewrite all of that, an
+ * external identity gets a local row keyed to its subject.
  *
- * The password hash is a sentinel no scrypt comparison can match. Such an account must not be
- * able to sign in with a password, and a hash that cannot verify is a stronger guarantee than
- * a flag some future code path might forget to check.
+ * There is no password column any more (migration 010): an account here cannot be signed in
+ * to except by presenting a token the realm issued, which is the whole point.
  */
 export async function upsertExternalUser({ issuer, subject, username }) {
   const { rows } = await query(
-    `INSERT INTO admin_user (username, password_hash, external_id, external_issuer)
-     VALUES ($1, 'external:no-password', $2, $3)
+    `INSERT INTO admin_user (username, external_id, external_issuer)
+     VALUES ($1, $2, $3)
      ON CONFLICT (external_issuer, external_id) WHERE external_id IS NOT NULL
        DO UPDATE SET username = EXCLUDED.username, last_login_at = now()
-     RETURNING id, username, password_hash, disabled, created_at, last_login_at,
-               password_changed_at`,
+     RETURNING id, username, disabled, created_at, last_login_at, permissions_changed_at`,
     [username, subject, issuer],
   );
   return mapUser(rows[0]);
 }
 
-export async function createUser(username, passwordHash) {
+/**
+ * The local row for an external subject, WITHOUT creating one.
+ *
+ * upsertExternalUser() is the usual entry point, but it also stamps last_login_at — and a
+ * sign-in that is about to be refused has not happened. Reading first keeps the refusal from
+ * writing anything at all, the same reason the role check runs before the upsert.
+ */
+export async function findExternalUser(issuer, subject) {
   const { rows } = await query(
-    'INSERT INTO admin_user (username, password_hash) VALUES ($1, $2) RETURNING id',
-    [username, passwordHash],
+    `SELECT id, username, disabled, created_at, last_login_at, permissions_changed_at
+     FROM admin_user WHERE external_issuer = $1 AND external_id = $2`, [issuer, subject],
   );
-  return Number(rows[0].id);
-}
-
-export async function updatePassword(userId, passwordHash) {
-  await query(
-    'UPDATE admin_user SET password_hash = $2, password_changed_at = now() WHERE id = $1',
-    [userId, passwordHash],
-  );
-}
-
-export async function markLogin(userId) {
-  await query('UPDATE admin_user SET last_login_at = now() WHERE id = $1', [userId]);
-}
-
-// ── refresh tokens ────────────────────────────────────────────────────────────────────────
-
-export async function insertRefreshToken({ jti, userId, tokenHash, family, expiresAt, userAgent, ip }) {
-  await query(
-    `INSERT INTO refresh_token (jti, user_id, token_hash, family, expires_at, user_agent, ip)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [jti, userId, tokenHash, family, expiresAt, userAgent ?? null, ip ?? null],
-  );
-}
-
-export async function findRefreshToken(jti) {
-  const { rows } = await query(
-    `SELECT jti, user_id, token_hash, family, issued_at, expires_at, revoked_at
-     FROM refresh_token WHERE jti = $1`, [jti],
-  );
-  if (!rows[0]) return null;
-  return {
-    jti: rows[0].jti,
-    userId: Number(rows[0].user_id),
-    tokenHash: rows[0].token_hash,
-    family: rows[0].family,
-    issuedAt: rows[0].issued_at,
-    expiresAt: rows[0].expires_at,
-    revokedAt: rows[0].revoked_at,
-  };
-}
-
-export async function revokeToken(jti) {
-  await query('UPDATE refresh_token SET revoked_at = now() WHERE jti = $1 AND revoked_at IS NULL',
-    [jti]);
+  return rows[0] ? mapUser(rows[0]) : null;
 }
 
 /**
- * Revoke an entire token family. Used when a already-revoked token is presented: that means
- * the token was captured, so both the attacker and the legitimate holder are cut off at the
- * next use rather than the attacker enjoying the full refresh lifetime.
+ * Refuse every credential this account already holds.
+ *
+ * One stamp is now the whole mechanism: every token verification compares against this
+ * column, so a token minted before it is refused. Before migration 010 this also revoked
+ * locally-issued refresh tokens, because one of those could mint a fresh access token a
+ * second later and walk past the stamp — this server issues none now.
+ *
+ * @returns true when the account exists, false when there is no such account
  */
-export async function revokeFamily(family) {
+export async function cutSessions(username) {
   const { rowCount } = await query(
-    'UPDATE refresh_token SET revoked_at = now() WHERE family = $1 AND revoked_at IS NULL',
-    [family],
+    'UPDATE admin_user SET permissions_changed_at = now() WHERE username = $1',
+    [username],
   );
-  return rowCount;
+  return rowCount > 0;
 }
 
-export async function revokeAllForUser(userId, { exceptJti = null } = {}) {
-  const { rowCount } = await query(
-    `UPDATE refresh_token SET revoked_at = now()
-     WHERE user_id = $1 AND revoked_at IS NULL AND ($2::uuid IS NULL OR jti <> $2)`,
-    [userId, exceptJti],
-  );
-  return rowCount;
+// ── self-service registration ─────────────────────────────────────────────────────────────
+
+/** Counted before the account is created, so a burst cannot outrun the ceiling. */
+export async function recordRegistrationAttempt(ip, username) {
+  await query('INSERT INTO registration_attempt (ip, username) VALUES ($1, $2)',
+    [ip ?? null, username ?? null]);
 }
 
-/** Rotate atomically so a concurrent double-refresh cannot mint two live tokens. */
-export function rotateRefreshToken(oldJti, next) {
-  return withTransaction(async (client) => {
-    await client.query('UPDATE refresh_token SET revoked_at = now() WHERE jti = $1', [oldJti]);
-    await client.query(
-      `INSERT INTO refresh_token (jti, user_id, token_hash, family, expires_at, user_agent, ip)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [next.jti, next.userId, next.tokenHash, next.family, next.expiresAt,
-        next.userAgent ?? null, next.ip ?? null],
-    );
-  });
-}
-
-export async function pruneExpiredTokens() {
-  const { rowCount } = await query(
-    "DELETE FROM refresh_token WHERE expires_at < now() - interval '30 days'",
-  );
-  return rowCount;
-}
-
-// ── login attempts ────────────────────────────────────────────────────────────────────────
-
-export async function recordLoginAttempt(username, ip, success) {
-  await query('INSERT INTO login_attempt (username, ip, success) VALUES ($1, $2, $3)',
-    [username ?? null, ip ?? null, success]);
-}
-
-/** Failures since the window opened, counted separately per username and per IP. */
-export async function countRecentFailures(username, ip, windowMinutes) {
+/**
+ * Attempts from one address inside the window.
+ *
+ * `IS NOT DISTINCT FROM` rather than `=`, because `null = null` is NULL in SQL: an address
+ * this server could not read would otherwise match no rows and be rate-limited not at all.
+ */
+export async function countRecentRegistrations(ip, windowMinutes) {
   const { rows } = await query(
-    `SELECT
-       count(*) FILTER (WHERE username = $1) AS by_user,
-       count(*) FILTER (WHERE ip = $2)       AS by_ip
-     FROM login_attempt
-     WHERE success = false AND at > now() - ($3 || ' minutes')::interval`,
-    [username ?? null, ip ?? null, String(windowMinutes)],
+    `SELECT count(*)::int AS n FROM registration_attempt
+     WHERE ip IS NOT DISTINCT FROM $1 AND at > now() - ($2 || ' minutes')::interval`,
+    [ip ?? null, String(windowMinutes)],
   );
-  return { byUser: Number(rows[0].by_user), byIp: Number(rows[0].by_ip) };
+  return rows[0].n;
 }
 
-export async function pruneLoginAttempts(days = 30) {
+export async function pruneRegistrationAttempts(days = 30) {
   const { rowCount } = await query(
-    "DELETE FROM login_attempt WHERE at < now() - ($1 || ' days')::interval", [String(days)],
+    "DELETE FROM registration_attempt WHERE at < now() - ($1 || ' days')::interval",
+    [String(days)],
   );
   return rowCount;
 }
@@ -171,10 +90,10 @@ function mapUser(row) {
   return {
     id: Number(row.id),
     username: row.username,
-    passwordHash: row.password_hash,
     disabled: row.disabled,
     createdAt: row.created_at,
     lastLoginAt: row.last_login_at,
-    passwordChangedAt: row.password_changed_at,
+    // NULL until an administrator cuts this account's sessions; see migration 009.
+    permissionsChangedAt: row.permissions_changed_at,
   };
 }

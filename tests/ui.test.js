@@ -35,6 +35,11 @@ function makeDom() {
       children: [],
       style: {},
       dataset: {},
+      // Attributes the renderers actually set — aria-expanded on a disclosure, aria-hidden on
+      // a decorative glyph. Recorded rather than ignored so a test can assert on them.
+      attrs: {},
+      setAttribute(name, value) { node.attrs[name] = String(value); },
+      getAttribute(name) { return node.attrs[name] ?? null; },
       classList: {
         add() {}, remove() {}, toggle() {}, contains: () => false,
       },
@@ -144,10 +149,14 @@ const ui = await (async () => {
       channelStanding, renderInspection, standingLabel, renderCatalog, channelCell,
       showCommit, renderSystems, kindCell, channelCell, renderApiKeys,
       setChannelLatest,
+      systemActions, assignActions, artifactActions, accessLabel, can,
       setRequest: (fn) => { request = fn; },
       setConfirm: (fn) => { window.confirm = fn; },
       setCatalog: (value) => { catalog = value; },
       setUnclassified: (value) => { unclassified = value; },
+      // What /admin/api/auth/me reports. The renderers read it to decide which controls
+      // exist at all, so a test has to be able to sign in as each level.
+      setScopes: (value) => { scopes = new Set(value); },
     };`;
 
   vm.runInNewContext(harnessed, sandbox, { filename: 'app.js' });
@@ -877,4 +886,117 @@ test('no key configured is stated as the outage it is', () => {
   const html = textOf(ui.dom.getElementById('api-keys'));
   assert.match(html, /No UPDATE_API_KEYS is configured/);
   assert.match(html, /401/);
+});
+
+// ── the config disclosure ─────────────────────────────────────────────────────────────────
+
+/** Every node in a rendered tree, in document order. */
+function walk(node) {
+  if (!node || typeof node !== 'object') return [];
+  return [node, ...(node.children ?? []).flatMap(walk)];
+}
+
+/**
+ * Collapsing a config group used to be a <div> with a click handler: unreachable by keyboard,
+ * announced as nothing, and with no way to tell whether a group was open or shut. The visual
+ * result is identical either way, which is why this is asserted rather than looked at.
+ */
+test('a config group collapses from a real button, not a clickable div', () => {
+  const owner = ui.configOwner('core', [
+    { param: 'web.port', value: 9090, extra: 'no' },
+  ], 'Locked');
+
+  const header = walk(owner).find((n) => n.className === 'cfg-sec-hdr');
+  assert.equal(header.tag, 'button', 'a div here is invisible to a keyboard');
+  assert.equal(header.type, 'button', 'never a submit button');
+  assert.equal(header.attrs['aria-expanded'], 'true', 'the open/shut state must be announced');
+
+  const body = walk(owner).find((n) => n.className === 'cfg-param-rows');
+  assert.equal(header.attrs['aria-controls'], body.id, 'and must point at what it collapses');
+});
+
+test('the disclosure triangle is not read aloud', () => {
+  const owner = ui.configOwner('core', [{ param: 'web.port', value: 9090, extra: 'no' }], 'Locked');
+  const arrow = walk(owner).find((n) => n.className === 'cfg-sec-arr');
+
+  // "black down-pointing small triangle" before every group name is noise: the state is
+  // already carried by aria-expanded on the button.
+  assert.equal(arrow.attrs['aria-hidden'], 'true');
+});
+
+test('two groups get distinct ids, so aria-controls points somewhere unambiguous', () => {
+  const owner = ui.configOwner('core', [
+    { param: 'web.port', value: 9090, extra: 'no' },
+    { param: 'update.channel', value: 'stable', extra: 'yes' },
+  ], 'Locked');
+
+  const ids = walk(owner).filter((n) => n.className === 'cfg-param-rows').map((n) => n.id);
+  assert.equal(new Set(ids).size, ids.length);
+});
+
+// ── what each level is shown ──────────────────────────────────────────────────────────────
+
+/**
+ * The UI reads its own permissions from /admin/api/auth/me and draws only what the server
+ * would accept. None of this is enforcement — every route checks for itself — but a Promote
+ * button that answers 403 reads as a broken page rather than as a permission the account does
+ * not have, and that is the difference between the two.
+ */
+
+const RELEASE_CATALOG = {
+  revision: '14',
+  systems: [{ name: 'HERA' }],
+  channels: [{ system: 'HERA', name: 'stable', latest: '0.13.4', paused: false, pinnedVersions: [] }],
+  releases: [{
+    version: '0.13.4', system: 'HERA', publishedAt: '2026-07-29T06:00:00Z', artifacts: [],
+  }],
+};
+
+const catalogAs = (...scopes) => {
+  ui.setScopes(scopes);
+  ui.setCatalog(RELEASE_CATALOG);
+  ui.renderCatalog();
+  return textOf(ui.dom.getElementById('catalog-list'));
+};
+
+test('an admin sees Promote and Delete on a release', () => {
+  const html = catalogAs('catalog:read', 'channel:write', 'catalog:delete');
+  assert.match(html, /Promote/);
+  assert.match(html, /Delete release/);
+});
+
+// The whole point of the split: a publisher fills the catalog and does not ship from it.
+test('a publisher sees neither', () => {
+  const html = catalogAs('catalog:read', 'artifact:write');
+  assert.doesNotMatch(html, /Promote/);
+  assert.doesNotMatch(html, /Delete release/);
+});
+
+test('a reader gets no row actions at all', () => {
+  ui.setScopes(['catalog:read']);
+  assert.equal(textOf(ui.systemActions({ name: 'HERA', releases: 0 })).trim(), '');
+  assert.equal(textOf(ui.assignActions({ serial: 'SN-1' })).trim(), '');
+  assert.doesNotMatch(textOf(ui.artifactActions({ id: 1, file: 'a.tar.gz', version: '0.1.0' })), /Delete/);
+});
+
+test('system:write brings the row actions back', () => {
+  ui.setScopes(['catalog:read', 'system:write']);
+  assert.match(textOf(ui.systemActions({ name: 'HERA', releases: 0 })), /Delete/);
+  assert.match(textOf(ui.assignActions({ serial: 'SN-1' })), /Assign/);
+});
+
+// Details is a read: it must survive every trimming above, or a reader cannot inspect what
+// they are allowed to see.
+test('Details stays for everyone', () => {
+  ui.setScopes(['catalog:read']);
+  assert.match(textOf(ui.artifactActions({ id: 1, file: 'a.tar.gz', version: '0.1.0' })), /Details/);
+});
+
+test('the header names the level, derived rather than told', () => {
+  ui.setScopes(['catalog:read', 'artifact:write', 'channel:write']);
+  assert.equal(ui.accessLabel(), 'admin');
+  ui.setScopes(['catalog:read', 'artifact:write']);
+  assert.equal(ui.accessLabel(), 'publisher');
+  ui.setScopes(['catalog:read']);
+  assert.equal(ui.accessLabel(), 'read-only');
 });

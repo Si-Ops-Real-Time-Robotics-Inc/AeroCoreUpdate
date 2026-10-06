@@ -55,6 +55,16 @@ async function guard(action) {
   }
 }
 
+/**
+ * Back to the sign-in page, which sends anyone without a session on to Keycloak.
+ *
+ * Signing out ends the Keycloak session too, so what lands is Keycloak's own sign-in prompt
+ * rather than a silent round trip back in. No exception is made for the Sign out button: not
+ * signed in is not signed in, and this page has one way of answering that.
+ *
+ * The local password form is still two clicks away — /admin/login.html?local=1 — and comes up
+ * by itself whenever Keycloak does not answer.
+ */
 function signOut() {
   clearSession();
   window.location.replace('/admin/login.html');
@@ -107,6 +117,60 @@ const bytes = (n) => {
 };
 
 const when = (value) => (value ? new Date(value).toLocaleString() : '—');
+
+// ── what this session may do ───────────────────────────────────────────────────────────────
+
+/**
+ * The scopes /admin/api/auth/me reports, so a control the server would refuse is never drawn.
+ *
+ * This is presentation, not enforcement — every route checks for itself, and a hidden button
+ * stops nobody who can open devtools. What it prevents is a publisher clicking Promote and
+ * getting a 403 that reads like a broken page instead of like a permission they do not have.
+ *
+ * Empty until `start()` fills it, which is the safe direction: a control appears once the
+ * server has said it would work, never before.
+ */
+let scopes = new Set();
+
+const can = (scope) => scopes.has(scope);
+
+/** Which scope a whole tab is useless without. */
+const TAB_SCOPE = {
+  publish: 'artifact:write',
+  systems: 'catalog:read',
+  catalog: 'catalog:read',
+  fleet: 'catalog:read',
+  rollout: 'catalog:read',
+  // Every panel on it — signing key, API keys, accounts — is a credential or an account.
+  security: 'signing_key',
+};
+
+/**
+ * Hide the tabs this session cannot use, and leave it on one it can.
+ *
+ * Publish is the tab the page opens on and the first one a publisher-less account cannot use,
+ * so landing there and having to work out why would be the common case rather than the odd
+ * one. Security matters more than tidiness: it loads five endpoints at once, three of which
+ * would 403, and Promise.all turns that into one unexplained error for the whole tab.
+ */
+function applyScopes() {
+  const buttons = [...$('tabs').querySelectorAll('button[data-tab]')];
+  for (const button of buttons) button.hidden = !can(TAB_SCOPE[button.dataset.tab]);
+
+  const active = buttons.find((button) => button.classList.contains('active'));
+  if (active && active.hidden) buttons.find((button) => !button.hidden)?.click();
+
+  // Inside a tab a reader can otherwise use: the system list is worth reading, the form that
+  // creates one is not worth offering to someone the server will refuse.
+  $('system-create').hidden = !can('system:write');
+}
+
+/** The level this session is at, for the header. Derived, so it cannot drift from the model. */
+function accessLabel() {
+  if (can('channel:write')) return 'admin';
+  if (can('artifact:write')) return 'publisher';
+  return 'read-only';
+}
 
 // ── tabs ──────────────────────────────────────────────────────────────────────────────────
 
@@ -181,19 +245,28 @@ function renderCatalog() {
     if (release.mandatory) head.append(el('span', 'tag warn', 'mandatory'));
     head.append(el('span', 'hint', when(release.publishedAt)));
 
-    const promote = el('button', 'ghost', 'Promote');
-    promote.addEventListener('click', () => guard(() => showPromote(release)));
-    head.append(promote);
+    // Promotion is what reaches an aircraft, and the one action a publisher does not have.
+    if (can('channel:write')) {
+      const promote = el('button', 'ghost', 'Promote');
+      promote.addEventListener('click', () => guard(() => showPromote(release)));
+      head.append(promote);
+    }
 
-    const remove = el('button', 'ghost danger', 'Delete release');
-    remove.addEventListener('click', () => guard(async () => {
-      if (!window.confirm(`Delete release ${release.version} and all its artifacts?`)) return;
-      await request(`/admin/api/releases/${release.version}`, { method: 'DELETE' });
-      showNotice(`Deleted ${release.version}`);
-      await loadCatalog();
-      renderCatalog();
-    }));
-    head.append(remove);
+    if (can('catalog:delete')) {
+      const remove = el('button', 'ghost danger', 'Delete release');
+      remove.addEventListener('click', () => guard(async () => {
+        if (!window.confirm(`Delete release ${release.version} and all its artifacts?`)) return;
+        await request(
+          `/admin/api/systems/${encodeURIComponent(release.system)}/releases/`
+          + encodeURIComponent(release.version),
+          { method: 'DELETE' },
+        );
+        showNotice(`Deleted ${release.version}`);
+        await loadCatalog();
+        renderCatalog();
+      }));
+      head.append(remove);
+    }
     card.append(head);
 
     if (release.notes) card.append(el('p', 'hint', release.notes));
@@ -479,6 +552,9 @@ function artifactActions(artifact) {
   const details = el('button', 'ghost', 'Details');
   details.addEventListener('click', () => guard(() => showArtifactDetails(artifact)));
 
+  wrap.append(details);
+  if (!can('catalog:delete')) return wrap;
+
   const remove = el('button', 'ghost danger', 'Delete');
   remove.addEventListener('click', () => guard(async () => {
     if (!window.confirm(`Delete artifact ${artifact.file} of ${artifact.version}?`)) return;
@@ -488,7 +564,7 @@ function artifactActions(artifact) {
     renderCatalog();
   }));
 
-  wrap.append(details, remove);
+  wrap.append(remove);
   return wrap;
 }
 
@@ -637,16 +713,32 @@ function groupParams(entries) {
   return groups;
 }
 
+/** Disclosure groups need distinct ids to point `aria-controls` at. */
+let configGroupSeq = 0;
+
 /** One collapsible group, with its rows. `columns` names the extra cell each row carries. */
 function configGroup(name, rows, extraHeader) {
   const section = el('div', 'cfg-psec');
 
-  const header = el('div', 'cfg-sec-hdr');
+  const body = el('div', 'cfg-param-rows');
+  body.id = `cfg-group-${++configGroupSeq}`;
+
+  // A button, not a div with a click handler: a div is unreachable by keyboard and announces
+  // nothing, so a screen reader user has no way to know a group can be collapsed — or that
+  // it currently is. `aria-expanded` is what says which of the two it is.
+  const header = el('button', 'cfg-sec-hdr');
+  header.type = 'button';
+  header.setAttribute('aria-expanded', 'true');
+  header.setAttribute('aria-controls', body.id);
+
   const arrow = el('span', 'cfg-sec-arr', '▾');
+  // Decorative: the state is already in aria-expanded, and "black down-pointing small
+  // triangle" read aloud before every group name is noise.
+  arrow.setAttribute('aria-hidden', 'true');
+
   header.append(arrow, el('span', 'cfg-sec-lbl', name || '(top level)'),
     el('span', 'cfg-sec-cnt', String(rows.length)), el('span', 'cfg-sec-line'));
 
-  const body = el('div', 'cfg-param-rows');
   const head = el('div', 'cfg-prow cfg-prow-hdr');
   head.append(el('div', 'cfg-ph', 'Parameter'), el('div', 'cfg-ph', 'Value'),
     el('div', 'cfg-ph', extraHeader));
@@ -671,6 +763,7 @@ function configGroup(name, rows, extraHeader) {
     const collapsed = body.hidden;
     body.hidden = !collapsed;
     arrow.classList.toggle('col', !collapsed);
+    header.setAttribute('aria-expanded', String(collapsed));
   });
 
   section.append(header, body);
@@ -1269,6 +1362,8 @@ function renderSystems() {
 
 function systemActions(system) {
   const wrap = el('div', 'row-actions');
+  if (!can('system:write')) return wrap;
+
   const remove = el('button', 'ghost danger', 'Delete');
 
   // Refused server-side while releases remain; saying so here saves a round trip.
@@ -1333,6 +1428,8 @@ function renderUnclassified() {
 
 function assignActions(node) {
   const wrap = el('div', 'row-actions');
+  // Placing a node decides which release line it follows, so it is not a reader's button.
+  if (!can('system:write')) return wrap;
 
   const select = document.createElement('select');
   select.append(new Option('choose a system…', ''));
@@ -1599,7 +1696,9 @@ async function start() {
   if (!await refresh()) return signOut();
 
   const me = await request('/admin/api/auth/me');
-  $('whoami').textContent = me.username;
+  scopes = new Set(me.scopes ?? []);
+  $('whoami').textContent = `${me.username} · ${accessLabel()}`;
+  applyScopes();
 
   renderPlatformBoxes();
   await guard(loadCatalog);

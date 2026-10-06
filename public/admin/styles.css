@@ -1,51 +1,148 @@
+/*
+ * AeroCoreUpdate admin UI — Minimalism & Swiss, at dashboard density.
+ *
+ * The direction comes from .claude/skills/ui-ux-pro-max: for an internal operations console
+ * it returns "Minimalism & Swiss Style — best for enterprise apps, dashboards, professional
+ * tools", with an accessibility profile of contrast 4.5, keyboard, visible focus, reduced
+ * motion. Density is the dashboard end of the scale: 4-32px spacing, not marketing air.
+ *
+ * Two of its recommendations are deliberately NOT followed:
+ *
+ *   - The Google Fonts import (Fira Code / Fira Sans). This server is reached on a LAN,
+ *     often with no route to the internet, over a certificate the browser already distrusts.
+ *     A stylesheet that blocks on fonts.googleapis.com would render late or never, and would
+ *     tell Google who is administering the fleet. The INTENT — a technical, data-first pair —
+ *     is kept with the system stack plus a monospace face for every version, hash and serial.
+ *   - Scroll-reveal motion. Nothing here is being sold; an operator opening this page is
+ *     reading a table, and animating it in only delays that.
+ *
+ * Every colour below is measured, not chosen by eye: each text token clears 4.5:1 against
+ * both the page and the card it sits on, in both schemes.
+ */
+
 :root {
+  color-scheme: dark light;
+
+  /* Dark is the default: this is a console people keep open, often at night. */
   --bg: #0f1115;
   --card: #171a21;
   --border: #262b36;
-  --text: #e6e9ef;
-  --muted: #98a1b3;
-  --accent: #4f8cff;
-  --ok: #35c46a;
-  --warn: #e0a63a;
-  --err: #ff6b6b;
+  --text: #e6e9ef;          /* 15.5 on bg, 14.3 on card */
+  --muted: #98a1b3;         /*  7.3 on bg,  6.7 on card */
+  --accent: #4f8cff;        /*  5.9 on bg,  5.4 on card */
+  --on-accent: #0f1115;     /*  5.9 on accent — white would be 3.2, which is why it is not white */
+  --ok: #35c46a;            /*  8.3 / 7.7 */
+  --warn: #e0a63a;          /*  8.7 / 8.0 */
+  --err: #ff6b6b;           /*  6.8 / 6.3 */
+
+  /* Dense end of the scale. Everything below uses these, so density is one edit. */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+
+  --text-xs: 0.7rem;
+  --text-sm: 0.82rem;
+  --text-md: 0.9rem;
+  --text-lg: 1.05rem;
+
+  /* Square, and no shadows anywhere. The style the skill returns for a console like this one
+     specifies `--border-radius: 0` and `--shadow: none`: the structure is meant to come from
+     the grid and from hairlines, not from rounded boxes floating over each other. */
+  --radius: 0;
+  --radius-sm: 0;
+
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Versions, serials, hashes and config keys. Aligned digits are the whole point: a fleet
+     list is read by comparing one column of numbers against itself. */
+  --font-mono: ui-monospace, SFMono-Regular, "Fira Code", Menlo, Consolas, monospace;
+
+  /* The smallest pointer target WCAG 2.2 AA accepts. Not 44px: that is native-platform
+     guidance and does not define web conformance. */
+  --target: 24px;
 }
 
 @media (prefers-color-scheme: light) {
   :root {
     --bg: #f6f7f9;
     --card: #ffffff;
-    --border: #e2e5ea;
-    --text: #16181d;
-    --muted: #626b7a;
+    --border: #dfe3e9;
+    --text: #16181d;        /* 16.6 / 17.8 */
+    --muted: #565f6e;       /*  6.0 /  6.5 */
+    /* The four below used to be inherited from the dark scheme, where they were never
+       readable: green tested 2.1:1 and amber 2.0:1 on white. A "live on stable" tag is the
+       one thing on this page nobody may misread. */
+    --accent: #1d4ed8;      /*  6.3 /  6.7 */
+    --on-accent: #ffffff;   /*  6.7 on accent */
+    --ok: #116b36;          /*  6.2 /  6.6 — darker than the 4.5 floor needs, because the
+                               chip tint below sits on top of it and eats some of the margin */
+    --warn: #8a5200;        /*  6.0 /  6.4 */
+    --err: #c81e1e;         /*  5.4 /  5.7 */
   }
 }
 
 * { box-sizing: border-box; }
 
+/*
+ * `hidden` must win over any class that sets `display`.
+ *
+ * The browser's own rule is `[hidden] { display: none }`, specificity (0,1,0) — which loses
+ * to something as ordinary as `.login form { display: grid }` at (0,1,1). The sign-in page
+ * toggles both of its forms with the hidden property, so without this the sign-up form is
+ * drawn under the sign-in one, permanently, and no JavaScript can put it away.
+ */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 15px/1.55 var(--font);
 }
 
 body.centered {
   display: grid;
   place-items: center;
   min-height: 100vh;
-  padding: 1rem;
+  padding: var(--space-4);
 }
 
-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+code { font-family: var(--font-mono); font-size: 0.92em; }
+
+/* ── focus and motion ───────────────────────────────────────────────────────────────────── */
+
+/* One rule for everything focusable, links included — the sign-in page's Keycloak button is
+   an anchor, and a ring that skipped it would leave the primary action invisible to a
+   keyboard. The ring colour clears 3:1 against every surface it lands on. */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* The header is sticky, so an element scrolled to by keyboard can end up underneath it.
+   Reserving its height means focus never lands behind the bar. */
+:where(a, button, input, select, textarea, [tabindex]) { scroll-margin-top: 4.5rem; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
 
 /* ── layout ─────────────────────────────────────────────────────────────────────────────── */
 
 .topbar {
   display: flex;
   align-items: center;
-  gap: 1.25rem;
+  gap: var(--space-5);
   flex-wrap: wrap;
-  padding: 0.85rem 1.25rem;
+  padding: var(--space-3) var(--space-5);
   background: var(--card);
   border-bottom: 1px solid var(--border);
   position: sticky;
@@ -53,89 +150,142 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
   z-index: 5;
 }
 
-.topbar h1 { margin: 0; font-size: 1rem; letter-spacing: -0.01em; }
-.topbar .user { margin-left: auto; display: flex; align-items: center; gap: 0.75rem; }
-.topbar .user span { color: var(--muted); font-size: 0.9rem; }
+.topbar h1 {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  text-wrap: balance;
+}
+.topbar .user { margin-left: auto; display: flex; align-items: center; gap: var(--space-3); }
+.topbar .user span { color: var(--muted); font-size: var(--text-md); }
 
-nav { display: flex; gap: 0.25rem; flex-wrap: wrap; }
+/* One segmented strip rather than six loose buttons: the tabs are one control with one
+   answer, and hairline dividers say so without adding a single pixel of decoration. */
+nav {
+  display: flex;
+  flex-wrap: wrap;
+  border: 1px solid var(--border);
+}
 nav button {
   background: transparent;
-  border: 1px solid transparent;
+  border: 0;
+  border-right: 1px solid var(--border);
   color: var(--muted);
-  padding: 0.35rem 0.75rem;
-  border-radius: 7px;
+  padding: var(--space-2) var(--space-4);
+  min-height: var(--target);
+  border-radius: 0;
   cursor: pointer;
   font: inherit;
+  font-size: var(--text-sm);
+  /* 200-250ms subtle hover is what the style asks for; anything quicker reads as a flicker. */
+  transition: color 0.2s ease, background-color 0.2s ease;
 }
-nav button:hover { color: var(--text); }
-nav button.active { background: var(--bg); border-color: var(--border); color: var(--text); }
+nav button:last-child { border-right: 0; }
+nav button:hover { color: var(--text); background: var(--bg); }
+nav button.active { background: var(--text); color: var(--card); font-weight: 500; }
 
-main { max-width: 1280px; margin: 0 auto; padding: 1.25rem; }
+/* 1200px, from the style's own CSS notes. Wider than that and a dense table stops being
+   scannable: the eye loses the row on the way back to the left edge. */
+main { max-width: 1200px; margin: 0 auto; padding: var(--space-5) var(--space-5) var(--space-6); }
 
 .card {
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 1.1rem 1.25rem;
-  margin-bottom: 1rem;
+  border-radius: var(--radius);
+  padding: var(--space-4) var(--space-5);
+  margin-bottom: var(--space-4);
 }
 
+/* Section labels, not headlines: the data is the content, and a heading that competes with
+   it is noise. */
+/* A rule under the label, not a box around it: the hairline is what separates a section from
+   its content, and it costs nothing to read past. */
 .card h2 {
-  margin: 0 0 0.9rem;
-  font-size: 0.78rem;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-4);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-xs);
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.1em;
   color: var(--muted);
+  text-wrap: balance;
 }
+/* The counters and revisions that ride inside a heading are data, not part of the label. */
+.card h2 .hint { margin-left: auto; text-transform: none; letter-spacing: 0; }
 
 .login { width: min(400px, 100%); }
 .login h1 { margin: 0; font-size: 1.25rem; }
-.login .sub { margin: 0.2rem 0 1.25rem; color: var(--muted); }
-.login form { display: grid; gap: 0.4rem; }
-.login button { margin-top: 0.75rem; }
+.login .sub { margin: 0.2rem 0 var(--space-5); color: var(--muted); }
+.login form { display: grid; gap: var(--space-2); }
+.login button { margin-top: var(--space-3); }
 
 /* ── forms ──────────────────────────────────────────────────────────────────────────────── */
 
 .grid {
   display: grid;
   grid-template-columns: minmax(120px, 180px) 1fr;
-  gap: 0.7rem 1rem;
+  gap: var(--space-3) var(--space-4);
   align-items: center;
 }
-.grid > label { color: var(--muted); font-size: 0.9rem; }
-.inline { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem; }
+.grid > label { color: var(--muted); font-size: var(--text-md); }
+.inline { display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-4); }
 
 input, select, button, textarea {
   font: inherit;
-  padding: 0.45rem 0.65rem;
-  border-radius: 7px;
+  padding: var(--space-2) var(--space-3);
+  min-height: var(--target);
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text);
 }
 
-input:focus-visible, select:focus-visible, button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
 button {
   background: var(--accent);
   border-color: transparent;
-  color: #fff;
+  color: var(--on-accent);
   cursor: pointer;
+  transition: filter 0.15s ease;
 }
 button:hover { filter: brightness(1.08); }
 button:disabled { opacity: 0.55; cursor: progress; }
 
+/*
+ * The Keycloak sign-in is a link, not a button: it is a top-level navigation to another
+ * origin, which is the only thing a browser will do from an HTTPS page to an HTTP identity
+ * provider. It should still look like the primary action, because it is.
+ */
+a.button {
+  display: inline-block;
+  padding: var(--space-2) var(--space-3);
+  min-height: var(--target);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--on-accent);
+  text-decoration: none;
+  text-align: center;
+  transition: filter 0.15s ease;
+}
+a.button:hover { filter: brightness(1.08); }
+a.button.block { display: block; }
+.hint.or { margin: var(--space-3) 0 var(--space-1); text-align: center; }
+
+/* Row actions. 24px is the floor, and the gap is what keeps two adjacent ones from being one
+   fat target — the spacing exception in the same rule. */
 button.ghost {
   background: transparent;
   border-color: var(--border);
   color: var(--muted);
-  padding: 0.25rem 0.6rem;
-  font-size: 0.85rem;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-sm);
 }
-button.ghost:hover { color: var(--text); }
+button.ghost:hover { color: var(--text); border-color: var(--muted); }
 button.ghost.danger:hover { color: var(--err); border-color: var(--err); }
 
 button.link {
@@ -143,25 +293,27 @@ button.link {
   border: none;
   color: var(--accent);
   padding: 0;
+  min-height: 0;
   text-decoration: underline;
 }
 
 .platforms {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
-  gap: 0.3rem;
+  gap: var(--space-1);
 }
-.platform { color: var(--muted); font-size: 0.88rem; }
-.platform input { width: auto; }
+.platform { color: var(--muted); font-size: var(--text-sm); }
+.platform input { width: auto; min-height: 0; }
 
 /* ── dropzone + progress ────────────────────────────────────────────────────────────────── */
 
 .dropzone {
   border: 2px dashed var(--border);
-  border-radius: 10px;
-  padding: 1.5rem 1rem;
+  border-radius: var(--radius);
+  padding: var(--space-5) var(--space-4);
   text-align: center;
   color: var(--muted);
+  transition: border-color 0.15s ease, color 0.15s ease;
 }
 .dropzone.over { border-color: var(--accent); color: var(--text); }
 .dropzone p { margin: 0.2rem 0; }
@@ -172,7 +324,7 @@ button.link {
   border: 1px solid var(--border);
   border-radius: 999px;
   overflow: hidden;
-  margin-top: 1rem;
+  margin-top: var(--space-4);
 }
 #progress-bar {
   height: 100%;
@@ -187,128 +339,229 @@ button.link {
    its own text instead — `slim (linux-` / `x86_64)` on two lines — which reads as a broken
    layout rather than as a table that is wider than its column. */
 .table-wrap { overflow-x: auto; }
-table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+table { border-collapse: collapse; width: 100%; font-size: var(--text-sm); }
 th, td {
   text-align: left;
-  padding: 0.45rem 0.6rem;
+  padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
+/* Versions, sizes, counts: same-width digits, so a column of numbers can be compared by
+   looking down it rather than by reading each one. */
+td { font-variant-numeric: tabular-nums; }
+tbody tr { transition: background-color 0.2s ease; }
+tbody tr:hover { background: color-mix(in srgb, var(--muted) 8%, transparent); }
+/* The header stays while the body scrolls — a fleet list is longer than a screen. */
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--card);
+}
 /* Free text — release notes, audit detail — is the one thing that should still wrap. */
 td.long, th.long { white-space: normal; min-width: 18rem; }
-th { color: var(--muted); font-weight: 500; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
-td.empty { color: var(--muted); text-align: center; padding: 1rem; }
-.row-actions { display: flex; gap: 0.35rem; }
+th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+td.empty { color: var(--muted); text-align: center; padding: var(--space-4); }
+.row-actions { display: flex; gap: var(--space-2); }
 
-.release { border: 1px solid var(--border); border-radius: 9px; padding: 0.85rem; margin-bottom: 0.85rem; }
-.release-head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.6rem; }
+.release {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--muted);
+  padding: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.release-head strong { font-size: var(--text-lg); font-variant-numeric: tabular-nums; }
+.release-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-2);
+}
 .release-head .ghost { margin-left: auto; }
 
-dl { display: grid; grid-template-columns: minmax(150px, auto) 1fr; gap: 0.4rem 1rem; margin: 0; }
+dl {
+  display: grid;
+  grid-template-columns: minmax(150px, auto) 1fr;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+}
 dt { color: var(--muted); }
-dd { margin: 0; word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88rem; }
+dd { margin: 0; word-break: break-all; font-family: var(--font-mono); font-size: var(--text-sm); }
 
 /* ── bits ───────────────────────────────────────────────────────────────────────────────── */
 
+/* Filled with a tint of their own colour rather than outlined. An outline puts the colour
+   at the edge, where a dense row of chips turns into a row of rings; a tint puts it behind
+   the word, which is what is actually being read. The word carries the state too — colour is
+   never the only thing saying it.
+   The tint is 12% and not more because the text sits ON it: at 16% the light-mode green chip
+   measured 4.33:1, under the floor, while every check against the plain card still passed.
+   Nothing about that is visible to the eye, which is why tests/stylesheet.test.js measures
+   the chip against its own background rather than against the panel behind it. */
 .tag {
   display: inline-block;
-  padding: 0.1rem 0.45rem;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  font-size: 0.78rem;
+  padding: 0.1rem var(--space-2);
+  border-radius: 0;
+  border: 1px solid transparent;
+  background: color-mix(in srgb, var(--muted) 12%, transparent);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
   color: var(--muted);
 }
-.tag.ok { color: var(--ok); border-color: var(--ok); }
-.tag.warn { color: var(--warn); border-color: var(--warn); }
-/* The Channel column: chips wrap inside the cell rather than stretching the table. */
-/* Two chips in a fixed order. nowrap on the chips so a name never breaks mid-word; the cell
-   itself may wrap when the window is narrow. */
-/* Two chips, one line. They wrap only when the viewport is genuinely too narrow for the
-   table to scroll into. */
-.chan-cell { display: flex; align-items: center; gap: 0.35rem; }
+.tag.ok {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+}
+.tag.warn {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+}
+
+/* The Channel column. Two chips in a fixed order: beta then stable, the direction a release
+   travels, so the same two positions are read on every row. They wrap only when the viewport
+   is genuinely too narrow for the table to scroll into. */
+.chan-cell { display: flex; align-items: center; gap: var(--space-1); }
 .chan-cell .tag { white-space: nowrap; }
 
 /* A channel that exists but does not serve this release: present, and clearly not the point. */
-.tag.dim { color: var(--muted); border-color: var(--border); opacity: 0.75; }
+.tag.dim {
+  color: var(--muted);
+  background: transparent;
+  border-color: var(--border);
+}
 
-.hint { color: var(--muted); font-size: 0.86rem; margin: 0.2rem 0; }
-.empty { color: var(--muted); text-align: center; padding: 1.25rem; }
+.hint { color: var(--muted); font-size: var(--text-sm); margin: 0.2rem 0; }
+
+/*
+ * Background knowledge, folded away.
+ *
+ * These paragraphs explain what a system is, what happens when an account is created here,
+ * what the fleet key actually unlocks. Every one of them is worth reading once and none of
+ * them is worth reading again, so they sit behind a summary instead of occupying the top of
+ * a panel forever. <details> and not a scripted toggle: it opens with no JavaScript, and a
+ * screen reader announces its state without being told to.
+ */
+.why { margin: 0 0 var(--space-3); font-size: var(--text-sm); }
+.why > summary {
+  cursor: pointer;
+  color: var(--muted);
+  min-height: var(--target);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  list-style: none;
+}
+/* `display: flex` on a summary drops the browser's own marker, and a summary that looks like
+   a sentence is a sentence nobody clicks. This draws one back, and turns it when open. */
+.why > summary::-webkit-details-marker { display: none; }
+.why > summary::before {
+  content: '';
+  width: 0.4em;
+  height: 0.4em;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.2s ease;
+}
+.why[open] > summary::before { transform: rotate(45deg); }
+.why > summary:hover { color: var(--text); }
+.why > p { color: var(--muted); margin: var(--space-2) 0 0; max-width: 70ch; }
+.empty { color: var(--muted); text-align: center; padding: var(--space-5); }
 
 .error { color: var(--err); }
 .notice { color: var(--ok); }
 
 .banner {
   max-width: 1080px;
-  margin: 1rem auto -0.25rem;
-  padding: 0.6rem 1rem;
+  margin: var(--space-4) auto calc(var(--space-1) * -1);
+  padding: var(--space-2) var(--space-4);
   border: 1px solid currentColor;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
 }
 
 /* Findings from bundle inspection: several problems at once, or several warnings. */
 .findings {
-  margin: 0.5rem 0 0;
-  padding-left: 1.2rem;
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-5);
   display: grid;
-  gap: 0.3rem;
+  gap: var(--space-1);
 }
 .findings li { line-height: 1.45; }
 
 #inspection h3 {
-  margin: 1rem 0 0.4rem;
-  font-size: 0.78rem;
+  margin: var(--space-4) 0 var(--space-2);
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--muted);
 }
 
 /* Publish is one action: a dropzone and a button. */
-#upload-form { display: grid; gap: 0.9rem; }
+#upload-form { display: grid; gap: var(--space-3); }
 #upload-form > button[type="submit"] { width: 100%; }
 
 /* Shown only when a config-only bundle turns out to name no platform of its own. */
 .card.inset {
-  margin-top: 1rem;
+  margin-top: var(--space-4);
   border-color: var(--warn);
   background: transparent;
 }
 .card.inset h3 {
-  margin: 0 0 0.3rem;
-  font-size: 0.85rem;
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-md);
 }
-.card.inset .platforms { margin: 0.6rem 0; }
+.card.inset .platforms { margin: var(--space-2) 0; }
 
 /* The confirm step after a staged upload. */
 .card.inset.ok { border-color: var(--ok); }
 .card.inset .row {
   display: flex;
-  gap: 0.6rem;
+  gap: var(--space-2);
   align-items: center;
   flex-wrap: wrap;
-  margin-top: 0.7rem;
+  margin-top: var(--space-3);
 }
 .card.inset .row select { min-width: 10rem; }
 
+/* ── config viewer ──────────────────────────────────────────────────────────────────────── */
+
 /* Config, grouped the way the engine's own System Config screen does it. */
-.cfg-owner { margin-top: 0.9rem; }
+.cfg-owner { margin-top: var(--space-3); }
 .cfg-owner h4 {
   margin: 0;
-  font-size: 0.9rem;
+  font-size: var(--text-md);
   font-weight: 600;
 }
 
+/* A real <button>, so it needs the filled-accent base undone: it is a disclosure, not the
+   primary action on the page. */
 .cfg-sec-hdr {
   display: flex;
   align-items: center;
-  gap: 0.45rem;
-  padding: 0.6rem 0 0.35rem;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) 0 var(--space-1);
+  min-height: var(--target);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   user-select: none;
 }
-.cfg-sec-arr { font-size: 0.65rem; color: var(--muted); transition: transform 0.15s; }
+.cfg-sec-arr { font-size: 0.65rem; color: var(--muted); transition: transform 0.15s ease; }
 .cfg-sec-arr.col { transform: rotate(-90deg); }
 .cfg-sec-lbl {
-  font-size: 0.68rem;
+  font-size: var(--text-xs);
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -316,17 +569,17 @@ dd { margin: 0; word-break: break-all; font-family: ui-monospace, SFMono-Regular
 }
 .cfg-sec-cnt {
   font-size: 0.62rem;
-  font-family: ui-monospace, Consolas, monospace;
+  font-family: var(--font-mono);
   color: var(--muted);
   border: 1px solid var(--border);
   border-radius: 99px;
-  padding: 0.05rem 0.4rem;
+  padding: 0.05rem var(--space-2);
 }
 .cfg-sec-line { flex: 1; height: 1px; background: var(--border); }
 
 .cfg-param-rows {
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
 }
 .cfg-prow {
@@ -336,20 +589,33 @@ dd { margin: 0; word-break: break-all; font-family: ui-monospace, SFMono-Regular
   align-items: center;
 }
 .cfg-prow:last-child { border-bottom: none; }
-.cfg-prow > div { padding: 0.4rem 0.6rem; overflow-wrap: anywhere; }
+.cfg-prow > div { padding: var(--space-1) var(--space-3); overflow-wrap: anywhere; }
 .cfg-prow-hdr { background: color-mix(in srgb, var(--border) 35%, transparent); }
 .cfg-ph {
-  font-size: 0.68rem;
+  font-size: var(--text-xs);
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--muted);
 }
-.cfg-pr-key { font-family: ui-monospace, Consolas, monospace; font-size: 0.85rem; }
+.cfg-pr-key { font-family: var(--font-mono); font-size: var(--text-sm); }
+.cfg-psec { margin-bottom: var(--space-2); }
+.cfg-pr-val { font-family: var(--font-mono); font-size: var(--text-sm); }
+
+/* ── narrow screens ─────────────────────────────────────────────────────────────────────── */
 
 @media (max-width: 700px) {
   .cfg-prow { grid-template-columns: 1fr 1fr; }
   .cfg-prow > .cfg-pr-lock { grid-column: 1 / -1; padding-top: 0; }
 }
-.cfg-psec { margin-bottom: 0.5rem; }
-.cfg-pr-val { font-family: ui-monospace, Consolas, monospace; font-size: 0.85rem; }
+
+/* A label column of 120-180px on a 375px screen leaves an input too narrow to read what has
+   been typed into it. Below that width the pair stacks instead. */
+@media (max-width: 560px) {
+  .grid { grid-template-columns: 1fr; gap: var(--space-1) 0; }
+  .grid > label { margin-top: var(--space-2); }
+  main { padding: var(--space-4) var(--space-3); }
+  .card { padding: var(--space-4) var(--space-3); }
+  dl { grid-template-columns: 1fr; gap: 0 0; }
+  dt { margin-top: var(--space-2); }
+}

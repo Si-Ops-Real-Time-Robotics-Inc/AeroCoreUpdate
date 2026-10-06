@@ -57,7 +57,7 @@ describe('a fresh upload lands on beta', { skip: hasDatabase ? false : SKIP_MESS
 
   test('a node on stable is offered nothing new', async () => {
     const res = await server.request(
-      '/api/v1/update/check?serial=SN-FLEET&platform=linux-x86_64&version=0.1.0&channel=stable',
+      '/api/v1/update/check?system=default&serial=SN-FLEET&platform=linux-x86_64&version=0.1.0&channel=stable',
       { headers: fleetHeaders() },
     );
 
@@ -67,7 +67,7 @@ describe('a fresh upload lands on beta', { skip: hasDatabase ? false : SKIP_MESS
 
   test('a node on beta is offered it immediately', async () => {
     const res = await server.request(
-      '/api/v1/update/check?serial=SN-TEST&platform=linux-x86_64&version=0.1.0&channel=beta',
+      '/api/v1/update/check?system=default&serial=SN-TEST&platform=linux-x86_64&version=0.1.0&channel=beta',
       { headers: fleetHeaders() },
     );
 

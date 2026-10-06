@@ -1,0 +1,15 @@
+-- Cutting an outstanding token short when someone's authorisation changes.
+--
+-- Scopes are derived from the roles inside a Keycloak token, so removing a role in Keycloak
+-- does not reach a token already issued: the holder keeps what they had until it expires,
+-- which the realm sets to fifteen minutes. For an account demoted for cause that is too long,
+-- and there is nothing to poll — the change happens at the identity provider, not here.
+--
+-- So an administrator stamps this column instead, and every token minted before it is
+-- refused. Same shape as password_changed_at, which already invalidates tokens predating a
+-- password change; no blocklist, no extra table, no second request per call.
+--
+-- NULL means "never cut", which is why this is nullable rather than defaulted to now(): a
+-- default would make every row's own creation a cut, and an account's first token — minted a
+-- moment BEFORE the row it creates — would be refused once for no reason anybody could see.
+ALTER TABLE admin_user ADD COLUMN permissions_changed_at TIMESTAMPTZ;

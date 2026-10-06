@@ -1,0 +1,1830 @@
+openapi: 3.1.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AeroCoreUpdate — OTA update server contract v1.
+#
+# This file is the source of truth. The admin UI's TypeScript client is
+# generated from it; the Node server is being moved onto it. Two parties
+# disagree at build time rather than at run time.
+#
+# Two surfaces live here and they are not the same API:
+#
+#   /api/v1/*    the NODE protocol. Aircraft and ground stations speak it, it is
+#                normative, and its field names and error codes are frozen — a
+#                node in the field cannot be redeployed to match a rename.
+#   /admin/api/* the operator API, behind this server's own web UI.
+#
+# Keyword conventions: MUST / SHOULD / MAY per RFC 2119. Inside v1 fields may
+# only be ADDED — never renamed, never repurposed, never removed. Consumers MUST
+# ignore unknown JSON fields.
+# ─────────────────────────────────────────────────────────────────────────────
+
+info:
+  title: AeroCoreUpdate
+  version: 1.0.0
+  summary: Signed OTA manifests for a GCS/AIR fleet, plus the operator API behind the admin UI.
+  description: |
+    A node asks *"I am this serial, on this platform, running this version — what
+    should I run?"* and the server answers with a manifest signed Ed25519. The
+    node verifies the signature against a `key_id → key` map it was provisioned
+    with, so a compromised transport cannot make it install anything.
+
+    **Authentication.** Two schemes, named per operation:
+
+    | Scheme        | Who                                                        |
+    |---------------|------------------------------------------------------------|
+    | `fleetApiKey` | A node, presenting the shared `X-API-Key` (`FLEET_AUTH_MODE=apikey`) |
+    | `bearerToken` | An operator — a Keycloak access token from the realm proxy_alpha hosts. There is no other kind. |
+
+    Under `FLEET_AUTH_MODE=jwt` the node surface takes `bearerToken` instead;
+    `both` accepts either. That is a deployment cutover, not a versioned change.
+
+    **Authorisation** on the admin surface is by scope, not by a yes/no. The
+    split that matters is `artifact:write` (fill the catalog) versus
+    `channel:write` (point a channel at a release, the one action that reaches an
+    aircraft). No role but admin holds both.
+  contact:
+    name: RTRobotics
+    email: si.ops@rtrobotics.me
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://{host}:{port}
+    description: This server, dialled directly. TLS only.
+    variables:
+      host: { default: 127.0.0.1 }
+      port: { default: "9443" }
+  - url: "{publicBaseUrl}"
+    description: |
+      Behind proxy_alpha's gateway, which is the normal deployment. Must match
+      PUBLIC_BASE_URL — it is also the origin baked into signed manifest URLs.
+    variables:
+      publicBaseUrl: { default: https://update.example.com }
+
+tags:
+  - name: fleet
+    description: The node protocol. Frozen; a field rename here strands aircraft.
+  - name: auth
+    description: Signing in to the admin surface, and asking what this session may do.
+  - name: catalog
+    description: Releases, artifacts and what each one contains.
+  - name: publishing
+    description: "Getting a bundle into the catalog. Two steps: stage to look, then commit."
+  - name: systems
+    description: The kinds of device AeroCore runs on, each with its own version line.
+  - name: rollout
+    description: Channels, and what the fleet reported back.
+  - name: security
+    description: Accounts, fleet keys, the signing key, TLS and the audit log.
+
+security:
+  - bearerToken: []
+
+paths:
+  # ── fleet: the node protocol ───────────────────────────────────────────────
+  /api/v1/health:
+    get:
+      tags: [fleet]
+      operationId: health
+      summary: Liveness probe.
+      description: The one endpoint that still answers while `MAINTENANCE=1`.
+      security: []
+      responses:
+        "200":
+          description: The server is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: ok }
+
+  /api/v1/update/check:
+    get:
+      tags: [fleet]
+      operationId: checkForUpdate
+      summary: What should this node run?
+      description: |
+        Always `200` with a body. A withheld update, an up-to-date node, an
+        unknown channel and a node whose system this server cannot place all
+        return the same `update_available: false` shape — a node's client treats
+        any other status as an error and never parses it, so `204` here would
+        read as a broken server.
+
+        Answers carry an `ETag`; a node SHOULD send `If-None-Match` and handle
+        `304`. The ETag is omitted when the server deliberately withheld a
+        cacheable answer, so the node keeps asking.
+      security:
+        - fleetApiKey: []
+        - bearerToken: []
+      parameters:
+        - name: serial
+          in: query
+          required: true
+          description: The node's own serial. Recorded, and used to pin a node to a release.
+          schema: { type: string }
+        - name: platform
+          in: query
+          required: true
+          schema: { $ref: "#/components/schemas/Platform" }
+        - name: version
+          in: query
+          required: true
+          description: What the node is running now, dotted numeric. Compared NUMERICALLY, never as a string.
+          schema: { $ref: "#/components/schemas/Version" }
+        - name: system
+          in: query
+          required: true
+          description: |
+            The system the node is, from its own manifest. Required: two systems
+            may publish the same version number, so the version alone does not
+            say which product is asking. Absent or blank — a build that was never
+            stamped — is `400 missing_parameter`. A name this server does not know
+            is NOT an error: the server offers nothing and records the sighting
+            for an admin to place.
+          schema: { type: string, maxLength: 64, pattern: "^[A-Za-z0-9][A-Za-z0-9 _.-]*$" }
+        - name: channel
+          in: query
+          required: false
+          description: Defaults to `stable`. A credential scoped to other channels is REFUSED, not redirected.
+          schema: { type: string, default: stable }
+        - name: plugins
+          in: query
+          required: false
+          description: 'What the node already has, as `Name@1.2.0,Other@2.0.1`.'
+          schema: { type: string }
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: The answer, whether or not there is an update.
+          headers:
+            ETag:
+              schema: { type: string }
+              description: Absent when the answer was deliberately not cacheable.
+            Cache-Control:
+              schema: { type: string, const: no-cache }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CheckResponse" }
+        "304": { description: Unchanged since the caller's ETag. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: |
+            This credential does not follow the channel that was asked for.
+            Refused rather than quietly served another channel: a device handed
+            something nobody chose for it would report success and hide the
+            mistake.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/Maintenance" }
+
+  /api/v1/update/download/{version}:
+    get:
+      tags: [fleet]
+      operationId: downloadRelease
+      summary: Fetch the bundle for a version.
+      description: |
+        Supports `Range` and `If-None-Match`; a conditional request takes
+        precedence over a range (RFC 9110). Nodes resume interrupted downloads,
+        so range support is load-bearing rather than a nicety.
+      security:
+        - fleetApiKey: []
+        - bearerToken: []
+      parameters:
+        - name: version
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/Version" }
+        - name: platform
+          in: query
+          required: true
+          schema: { $ref: "#/components/schemas/Platform" }
+        - name: system
+          in: query
+          required: true
+          description: |
+            Which system's release this is. A version names a release only
+            together with its system. The check response hands out this URL
+            complete; a caller never composes it.
+          schema: { type: string }
+        - name: Range
+          in: header
+          required: false
+          schema: { type: string }
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: The whole bundle.
+          headers:
+            ETag: { schema: { type: string } }
+            Accept-Ranges: { schema: { type: string, const: bytes } }
+            Content-Disposition: { schema: { type: string } }
+          content:
+            application/gzip:
+              schema: { type: string, format: binary }
+        "206":
+          description: The requested byte range.
+          headers:
+            Content-Range: { schema: { type: string } }
+          content:
+            application/gzip:
+              schema: { type: string, format: binary }
+        "304": { description: Unchanged since the caller's ETag. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "416":
+          description: The range lies beyond the end of the artifact.
+          headers:
+            Content-Range: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/update/report:
+    post:
+      tags: [fleet]
+      operationId: reportOutcome
+      summary: Tell the server how an update went.
+      description: |
+        Never rejected on schema. A node that reports badly still reports
+        something, and losing the sighting is worse than storing a row with a
+        missing field.
+      security:
+        - fleetApiKey: []
+        - bearerToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Report" }
+      responses:
+        "200":
+          description: Recorded.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, const: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ── auth ───────────────────────────────────────────────────────────────────
+  /admin/api/auth/refresh:
+    post:
+      tags: [auth]
+      operationId: refreshSession
+      summary: Trade the refresh cookie for a new access token.
+      description: |
+        One session model for both kinds of sign-in: the page calls this on load
+        and never learns whether a local account or Keycloak produced the token.
+        Requires `X-Requested-With: fetch` — a plain HTML form cannot set it,
+        which is what makes it a CSRF defence.
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/FetchHeader"
+      responses:
+        "200":
+          description: A fresh access token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /admin/api/auth/me:
+    get:
+      tags: [auth]
+      operationId: me
+      summary: Who this session is, and what it may do.
+      description: |
+        `scopes` exists so the UI can hide what it may not use. Without it a
+        publisher is shown a Promote button that answers 403, which reads as a
+        broken page rather than as a permission they do not have.
+      responses:
+        "200":
+          description: The signed-in principal.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /admin/api/auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: End this session.
+      security: []
+      parameters: [{ $ref: "#/components/parameters/FetchHeader" }]
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+
+  /admin/api/auth/oidc:
+    get:
+      tags: [auth]
+      operationId: oidcStatus
+      summary: Should the sign-in page offer Keycloak?
+      description: Unauthenticated by definition — the page asks before anyone holds a credential.
+      security: []
+      responses:
+        "200":
+          description: Whether Keycloak is configured, and whether it is answering.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OidcStatus" }
+
+  /admin/api/auth/oidc/start:
+    get:
+      tags: [auth]
+      operationId: oidcStart
+      summary: Begin the Keycloak redirect.
+      deprecated: true
+      description: |
+        Server-side Authorization Code exchange, kept for the previous admin UI.
+        The replacement UI is a PUBLIC client doing PKCE in the browser, which
+        removes the client secret instead of hiding it. Remove once no deployment
+        serves the old bundle.
+      security: []
+      responses:
+        "302": { description: Off to the issuer. }
+
+  /admin/api/auth/oidc/callback:
+    get:
+      tags: [auth]
+      operationId: oidcCallback
+      summary: Where the issuer sends the browser back to.
+      deprecated: true
+      security: []
+      responses:
+        "200":
+          description: Signed in.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+
+  /admin/api/auth/registration:
+    get:
+      tags: [auth]
+      operationId: registrationStatus
+      summary: May this server be signed up for?
+      description: Says only yes or no — an anonymous caller has no business learning which half of the configuration is missing.
+      security: []
+      responses:
+        "200":
+          description: Whether self-service sign-up is on.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled: { type: boolean }
+
+  /admin/api/auth/register:
+    post:
+      tags: [auth]
+      operationId: register
+      summary: Create an account with no credential presented.
+      description: |
+        Off unless `ALLOW_SELF_REGISTRATION`. The role is never taken from the
+        body — it is always `KEYCLOAK_DEFAULT_ROLE`, which opens nothing here
+        while `OIDC_ADMIN_ROLE` is enforced.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NewUser" }
+      responses:
+        "201":
+          description: Created in the realm.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedAccount" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  # ── catalog ────────────────────────────────────────────────────────────────
+  /admin/api/catalog:
+    get:
+      tags: [catalog]
+      operationId: getCatalog
+      summary: Everything the admin UI's first screen needs.
+      responses:
+        "200":
+          description: The catalog.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Catalog" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/api/artifacts/{id}:
+    parameters: [{ $ref: "#/components/parameters/ArtifactId" }]
+    get:
+      tags: [catalog]
+      operationId: getArtifact
+      summary: One artifact, with what inspection found inside it.
+      responses:
+        "200":
+          description: The artifact.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Artifact" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [catalog]
+      operationId: deleteArtifact
+      summary: Remove an artifact. Requires `catalog:delete`.
+      description: |
+        Refused while any channel serves the release it belongs to, for the same
+        reason a whole release is: removing the only artifact a platform is served
+        from tells every device on that channel there is no update, with no error.
+      responses:
+        "200":
+          description: Removed, with its file.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id: { type: integer }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: |
+            A channel is serving the release this artifact belongs to. `details`
+            carries a finding with `rule: release_in_use` and the `channels`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /admin/api/artifacts/{id}/diff:
+    parameters: [{ $ref: "#/components/parameters/ArtifactId" }]
+    get:
+      tags: [catalog]
+      operationId: getArtifactDiff
+      summary: What changes against the release below this one.
+      responses:
+        "200":
+          description: The diff. `no_op` is true when this release changes nothing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Diff" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/api/artifacts/{id}/metadata:
+    parameters: [{ $ref: "#/components/parameters/ArtifactId" }]
+    put:
+      tags: [catalog]
+      operationId: setArtifactMetadata
+      summary: Amend an artifact's metadata. Requires `artifact:write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: The amended artifact.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Artifact" }
+
+  /admin/api/systems/{system}/releases:
+    parameters: [{ $ref: "#/components/parameters/SystemPath" }]
+    post:
+      tags: [catalog]
+      operationId: createRelease
+      summary: Create a release row in a system. Requires `artifact:write`.
+      description: |
+        A release is identified by its system AND its version: two systems
+        may publish the same number. `system` is taken from the path and
+        refused in the body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /admin/api/systems/{system}/releases/{version}:
+    parameters:
+      - $ref: "#/components/parameters/SystemPath"
+      - $ref: "#/components/parameters/VersionPath"
+    patch:
+      tags: [catalog]
+      operationId: updateRelease
+      summary: Amend a release. Requires `artifact:write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Amended.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+    delete:
+      tags: [catalog]
+      operationId: deleteRelease
+      summary: Delete a release. Requires `catalog:delete`.
+      description: |
+        Refused while any channel serves the release. A channel pointing at nothing
+        answers every device "no update", which looks exactly like a fleet that is up
+        to date — so point the channel at another release first. Files are removed
+        after the commit.
+      responses:
+        "200":
+          description: Removed, with every artifact in it.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [system, version, artifacts]
+                properties:
+                  system: { type: string }
+                  version: { $ref: "#/components/schemas/Version" }
+                  artifacts: { type: integer, description: How many artifacts went with it. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: |
+            A channel is serving this release. `details` carries a finding with
+            `rule: release_in_use` and the `channels`, so a caller can say which one
+            to move without parsing the message.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /admin/api/systems/{system}/releases/{version}/artifacts:
+    parameters:
+      - $ref: "#/components/parameters/SystemPath"
+      - $ref: "#/components/parameters/VersionPath"
+    post:
+      tags: [publishing]
+      operationId: uploadArtifactToRelease
+      summary: One-shot upload against a known system and version, for a scripted caller.
+      description: |
+        Both are cross-checked against the bundle, and a mismatch is refused.
+        The system in the path is used only when the bundle names none.
+      parameters:
+        - name: channel
+          in: query
+          required: false
+          description: |
+            Point this channel at the uploaded release, in the same transaction.
+
+            Omitted, the release lands on the automatic promotion target. Present
+            and empty, it lands nowhere. Naming any channel other than the staging
+            channel requires `channel:write` — uploading fills the catalog, moving
+            a channel is what reaches an aircraft, and they are deliberately
+            different rights.
+          schema: { type: string }
+        - name: allow_rollback
+          in: query
+          required: false
+          description: |
+            Proceed even though the named channel would move backwards. Requires
+            `channel:write`, like naming a channel does: it is meaningless without it.
+          schema: { type: boolean }
+        - name: kind
+          in: query
+          required: false
+          description: Cross-checked against the bundle manifest; a mismatch is refused.
+          schema: { type: string, enum: [fleet, slim] }
+        - name: platforms
+          in: query
+          required: false
+          description: Comma-separated. Cross-checked against the bundle manifest.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/gzip:
+            schema: { type: string, format: binary }
+      responses:
+        "201":
+          description: Stored.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Artifact" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+
+  # ── publishing ─────────────────────────────────────────────────────────────
+  /admin/api/artifacts:
+    post:
+      tags: [publishing]
+      operationId: uploadArtifact
+      summary: One-shot upload, version taken from the bundle, for a scripted caller.
+      parameters:
+        - name: channel
+          in: query
+          required: false
+          description: |
+            Point this channel at the uploaded release, in the same transaction.
+
+            Omitted, the release lands on the automatic promotion target. Present
+            and empty, it lands nowhere. Naming any channel other than the staging
+            channel requires `channel:write` — uploading fills the catalog, moving
+            a channel is what reaches an aircraft, and they are deliberately
+            different rights.
+          schema: { type: string }
+        - name: allow_rollback
+          in: query
+          required: false
+          description: |
+            Proceed even though the named channel would move backwards. Requires
+            `channel:write`, like naming a channel does: it is meaningless without it.
+          schema: { type: boolean }
+        - name: kind
+          in: query
+          required: false
+          description: Cross-checked against the bundle manifest; a mismatch is refused.
+          schema: { type: string, enum: [fleet, slim] }
+        - name: platforms
+          in: query
+          required: false
+          description: Comma-separated. Cross-checked against the bundle manifest.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/gzip:
+            schema: { type: string, format: binary }
+      responses:
+        "201":
+          description: Stored.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Artifact" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+
+  /admin/api/uploads:
+    post:
+      tags: [publishing]
+      operationId: stageUpload
+      summary: Step one — stage a bundle so an operator can look before committing.
+      description: |
+        Nothing is stored yet and the response says so with `stored: false`.
+        Without that flag the screen reads as done, because it looks exactly like
+        the one that used to come after the write.
+      parameters:
+        - name: kind
+          in: query
+          schema: { type: string }
+        - name: platforms
+          in: query
+          schema: { type: string }
+        - name: X-Expected-SHA256
+          in: header
+          required: false
+          description: Refuse the upload unless the bytes hash to this.
+          schema: { type: string, pattern: "^[a-f0-9]{64}$" }
+      requestBody:
+        required: true
+        content:
+          application/gzip:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Staged, not stored.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StagedUpload" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+
+  /admin/api/uploads/{token}:
+    parameters:
+      - name: token
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [publishing]
+      operationId: commitUpload
+      summary: Step two — commit what was staged, onto the staging channel.
+      description: |
+        Takes no target channel. A release lands on `beta` and reaches `stable`
+        only when an admin promotes it, so the person uploading does not choose
+        where it goes.
+
+        It can still be refused for moving `beta` backwards, like every other
+        path that points a channel somewhere.
+      parameters:
+        - name: allow_rollback
+          in: query
+          required: false
+          description: Proceed even though the staging channel would move backwards.
+          schema: { type: boolean }
+      responses:
+        "201":
+          description: Stored.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommittedUpload" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ── systems ────────────────────────────────────────────────────────────────
+  /admin/api/systems:
+    get:
+      tags: [systems]
+      operationId: listSystems
+      responses:
+        "200":
+          description: Every system.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  systems:
+                    type: array
+                    items: { $ref: "#/components/schemas/System" }
+    post:
+      tags: [systems]
+      operationId: createSystem
+      summary: Create a system. Requires `system:write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                description: { type: string }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/System" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /admin/api/systems/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      tags: [systems]
+      operationId: updateSystem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Amended.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/System" }
+    delete:
+      tags: [systems]
+      operationId: deleteSystem
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+
+  /admin/api/systems/{system}/channels/{name}:
+    parameters:
+      - name: system
+        in: path
+        required: true
+        schema: { type: string }
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [rollout]
+      operationId: getChannel
+      responses:
+        "200":
+          description: Where the channel points.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Channel" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [rollout]
+      operationId: putChannel
+      summary: Point a channel at a version. Requires `channel:write`.
+      description: |
+        **The only operation in this API that reaches an aircraft.** Everything
+        else adds to a catalog nobody is served from. That is why `channel:write`
+        is a scope of its own: an engineer uploads, and the admin who reviewed
+        the build is who moves the channel. A leaked publisher token stages a
+        file; it does not ship firmware.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { $ref: "#/components/schemas/Version" }
+      responses:
+        "200":
+          description: Moved. `released` names the channels this version was taken off.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChannelMoved" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ── fleet inventory and rollout ────────────────────────────────────────────
+  /admin/api/unclassified:
+    get:
+      tags: [systems]
+      operationId: listUnclassified
+      summary: Nodes whose claimed system this server does not have.
+      parameters:
+        - name: filter
+          in: query
+          schema: { type: string, enum: [pending, assigned, all], default: all }
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: The nodes waiting to be placed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodes: { type: array, items: { $ref: "#/components/schemas/UnclassifiedNode" } }
+
+  /admin/api/unclassified/{serial}:
+    parameters:
+      - name: serial
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      tags: [systems]
+      operationId: assignNode
+      summary: Place a node into a system. Requires `system:write`.
+      description: |
+        The only way to classify a device that names a system this server
+        does not have — usually a mis-stamped build. Send
+        `{"system": null}` to put it back in the pending list. Nothing resolves
+        itself with time.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                system: { type: [string, "null"] }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+    delete:
+      tags: [systems]
+      operationId: forgetNode
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/api/fleet:
+    get:
+      tags: [rollout]
+      operationId: fleetInventory
+      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200":
+          description: Every node that has checked in.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodes: { type: array, items: { $ref: "#/components/schemas/FleetNode" } }
+
+  /admin/api/reports:
+    get:
+      tags: [rollout]
+      operationId: rolloutReports
+      summary: What the fleet reported back.
+      parameters:
+        - name: version
+          in: query
+          schema: { $ref: "#/components/schemas/Version" }
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Roll-up plus the most recent rows.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { type: [string, "null"] }
+                  stats: { type: array, items: { $ref: "#/components/schemas/RolloutStat" } }
+                  recent: { type: array, items: { $ref: "#/components/schemas/NodeReport" } }
+
+  # ── security ───────────────────────────────────────────────────────────────
+  /admin/api/users:
+    get:
+      tags: [security]
+      operationId: listUsers
+      summary: Accounts in the Keycloak realm. Requires `user:admin`.
+      description: "Answers `configured: false` rather than an error when Keycloak is not wired up, so the UI can hide the panel instead of showing a broken one."
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - name: search
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: The accounts, or a flag saying there is no realm to ask.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  configured: { type: boolean }
+                  users: { type: array, items: { $ref: "#/components/schemas/RealmUser" } }
+    post:
+      tags: [security]
+      operationId: createUser
+      summary: Create a realm account. Requires `user:admin`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NewUser" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedAccount" }
+
+  /admin/api/users/{username}/sessions:
+    delete:
+      tags: [security]
+      operationId: revokeUserSessions
+      summary: The second half of a demotion. Requires `user:admin`.
+      description: |
+        Keycloak stops granting the role; this stops the token that still claims
+        it. Cutting sessions does not remove a role — it only stops an old token
+        from carrying one.
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  username: { type: string }
+                  note: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/api/api-keys:
+    get:
+      tags: [security]
+      operationId: fleetApiKeys
+      summary: The shared fleet keys. Requires `signing_key`.
+      description: |
+        Every read is audited. The key is SHARED — every node presents the same
+        string, so seeing it is equivalent to being able to impersonate any node,
+        and rotating it means re-provisioning the whole fleet.
+      responses:
+        "200":
+          description: The configured keys, with that warning in the payload.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys: { type: array, items: { $ref: "#/components/schemas/FleetApiKey" } }
+                  shared: { type: boolean, const: true }
+                  note: { type: string }
+
+  /admin/api/signing-key:
+    get:
+      tags: [security]
+      operationId: signingKey
+      summary: The OTA signing key's public half. Requires `signing_key`.
+      description: The exact string an operator provisions into a node's `key_id → public key` map.
+      responses:
+        "200":
+          description: The key, or a statement that this server holds no private half.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SigningKey" }
+
+  /admin/api/signing-key/certificate:
+    put:
+      tags: [security]
+      operationId: putSigningKeyCertificate
+      summary: Store a root-signed certificate for a signing key.
+      description: The root signs it OFFLINE; this server only verifies it against the root's public half and stores it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /admin/api/audit:
+    get:
+      tags: [security]
+      operationId: auditLog
+      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200":
+          description: Recent audited actions.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries: { type: array, items: { $ref: "#/components/schemas/AuditEntry" } }
+
+  /admin/api/tls:
+    get:
+      tags: [security]
+      operationId: tlsInfo
+      summary: The certificate this server presents, and its fingerprint.
+      responses:
+        "200":
+          description: TLS material.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TlsInfo" }
+
+components:
+  securitySchemes:
+    fleetApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        The shared fleet credential. One string for every node in a fleet, which
+        is why rotating it means re-provisioning them all. Configured with
+        `UPDATE_API_KEYS`, never in the database.
+    bearerToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        A Keycloak access token from the realm proxy_alpha hosts. This server
+        issues no tokens of its own and holds no account, so a token this realm
+        did not sign is not a credential here. Tokens MUST be signed EdDSA
+        — a realm ships RSA keys by default and RS256 cannot be verified on an
+        Android node, so nothing here verifies anything until an EdDSA realm key
+        exists.
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1 }
+    ArtifactId:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1 }
+    SystemPath:
+      name: system
+      in: path
+      required: true
+      schema: { type: string }
+    VersionPath:
+      name: version
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/Version" }
+    FetchHeader:
+      name: X-Requested-With
+      in: header
+      required: true
+      description: Must be `fetch`. A plain HTML form cannot set a custom header, which is what makes this a CSRF defence.
+      schema: { type: string, const: fetch }
+
+  responses:
+    Ok:
+      description: Done.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok: { type: boolean, const: true }
+    BadRequest:
+      description: Malformed or missing parameter.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: No credential, or one this server does not accept.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Authenticated, but this principal lacks the scope the operation needs.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such thing.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Already exists.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooLarge:
+      description: Bigger than `UPLOAD_MAX_BYTES`.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: Too many attempts from this source.
+      headers:
+        Retry-After: { schema: { type: integer } }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Maintenance:
+      description: Refusing everything but health while publishing.
+      headers:
+        Retry-After: { schema: { type: integer } }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorCode"
+        message:
+          type: string
+          description: Prose for a person. May be reworded at any time — branch on `error`, never on this.
+        details:
+          type: array
+          items: { $ref: "#/components/schemas/Finding" }
+          description: Present on validation failures; the findings that caused the refusal.
+      description: |
+        The envelope every failure uses, on BOTH surfaces. Named `error` rather
+        than `code` because the node protocol froze it that way.
+
+    ErrorCode:
+      type: string
+      description: |
+        A CLOSED enum. Statuses the node protocol never named (403, 405, 409,
+        413, 415, 426) keep their correct HTTP status but reuse the nearest legal
+        code, so a conforming node never sees a code it cannot branch on.
+      enum:
+        - missing_parameter
+        - invalid_parameter
+        - invalid_api_key
+        - not_found
+        - range_not_satisfiable
+        - rate_limited
+        - server_error
+        - maintenance
+
+    Version:
+      type: string
+      pattern: "^[0-9]+(\\.[0-9]+)*$"
+      description: Dotted numeric. Compared NUMERICALLY — `1.10.0` is above `1.9.0`, which string ordering gets wrong.
+      examples: ["1.4.2"]
+
+    Platform:
+      type: string
+      description: One of the thirteen platforms the protocol names. Case matters, because it matters to the node.
+
+    CheckResponse:
+      oneOf:
+        - $ref: "#/components/schemas/NoUpdate"
+        - $ref: "#/components/schemas/Manifest"
+      discriminator:
+        propertyName: update_available
+
+    NoUpdate:
+      type: object
+      required: [update_available]
+      properties:
+        update_available: { type: boolean, const: false }
+        channels:
+          $ref: "#/components/schemas/Channels"
+
+    Manifest:
+      type: object
+      required: [update_available, version, url, size, sha256, target, mandatory, signature]
+      description: |
+        `signature` covers exactly six fields, joined by newlines with no trailing
+        newline: version, size, sha256, target, min_version, published_at — the
+        last two contributing an empty string when absent. Every other key here
+        is a SIBLING of the signature and changes no signed byte. Adding one is
+        safe; making one signed is not.
+      properties:
+        update_available: { type: boolean, const: true }
+        version: { $ref: "#/components/schemas/Version" }
+        url:
+          type: string
+          description: Absolute when `PUBLIC_BASE_URL` is set, relative otherwise. Behind the gateway it MUST be the public URL, or no node can fetch it.
+        size: { type: integer, minimum: 0 }
+        sha256: { type: string, pattern: "^[a-f0-9]{64}$" }
+        target: { type: string, description: Canonical sorted platform target. }
+        min_version: { $ref: "#/components/schemas/Version" }
+        mandatory: { type: boolean }
+        notes: { type: string }
+        published_at: { type: string, format: date-time }
+        signature: { type: string, description: Ed25519 over the six-field payload, base64. }
+        key_certificate:
+          type: string
+          description: Omitted entirely when no certificate has been uploaded for this key, which is what keeps older deployments unchanged.
+        system: { type: string }
+        channels:
+          $ref: "#/components/schemas/Channels"
+
+    Channels:
+      type: array
+      items: { type: string }
+      description: |
+        A FLAT array of names, sent on both response shapes. The node reads it
+        with a string-only check, so objects would be silently dropped. It is
+        what lets a node sitting on a channel this server does not have be
+        corrected at all.
+
+    Report:
+      type: object
+      description: Never rejected on schema — a badly-formed report is still a sighting.
+      properties:
+        serial: { type: string }
+        version: { $ref: "#/components/schemas/Version" }
+        platform: { $ref: "#/components/schemas/Platform" }
+        status: { type: string, description: Anything other than success counts against the release. }
+        error: { type: string }
+      additionalProperties: true
+
+    Session:
+      type: object
+      required: [access_token, expires_in, user]
+      properties:
+        access_token: { type: string }
+        expires_in: { type: integer }
+        user: { type: object, additionalProperties: true }
+
+    Me:
+      type: object
+      required: [id, username, scopes]
+      properties:
+        id: { type: [string, integer] }
+        username: { type: string }
+        last_login_at: { type: [string, "null"], format: date-time }
+        scopes:
+          type: array
+          items: { $ref: "#/components/schemas/Scope" }
+          description: Sorted, so the response is stable.
+
+    Scope:
+      type: string
+      enum: [self, "catalog:read", "artifact:write", "channel:write", "catalog:delete", "system:write", "user:admin", signing_key]
+
+    NewUser:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        email: { type: string, format: email }
+        password: { type: string, format: password }
+
+    CreatedAccount:
+      type: object
+      properties:
+        username: { type: string }
+        email: { type: string }
+        role: { type: [string, "null"] }
+        note: { type: string }
+
+    System:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        description: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+
+    Channel:
+      type: object
+      properties:
+        system: { type: string }
+        name: { type: string }
+        latest: { type: [string, "null"] }
+        updated_at: { type: [string, "null"], format: date-time }
+
+    ChannelMoved:
+      type: object
+      properties:
+        system: { type: string }
+        name: { type: string }
+        latest: { type: string }
+        released:
+          type: array
+          items: { type: string }
+          description: Channels this version was taken off, so the caller can say what else moved.
+
+    Artifact:
+      type: object
+      required: [id, system, version, platform, size, sha256]
+      properties:
+        id: { type: integer }
+        system: { type: string }
+        version: { $ref: "#/components/schemas/Version" }
+        kind: { type: [string, "null"] }
+        platform: { $ref: "#/components/schemas/Platform" }
+        platforms: { type: array, items: { $ref: "#/components/schemas/Platform" } }
+        file: { type: string }
+        size: { type: integer }
+        sha256: { type: string }
+        pre_signed: { type: boolean }
+        uploaded_at: { type: string, format: date-time }
+        uploaded_by: { type: [string, "null"] }
+        bundle_format:
+          type: [string, "null"]
+          description: NULL means the row predates bundle inspection, which is not the same as `legacy`.
+        warning_count: { type: integer }
+        plugins:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties: { type: string }
+        inspection:
+          oneOf:
+            - $ref: "#/components/schemas/Inspection"
+            - type: "null"
+
+    Diff:
+      type: object
+      description: |
+        What changes if this artifact is promoted, against the release below it in the
+        same system. Nothing else in the system answers "what am I actually shipping?" —
+        the node reports per-component skips with no top-level error, so a release that
+        changes nothing looks exactly like one that changes everything.
+
+        Field casing is mixed and deliberately reported as it is: the service emits
+        camelCase, and `no_op` is added by the controller.
+      required: [previousVersion, isFirst, platforms, cores, plugins, config, no_op]
+      properties:
+        previousVersion:
+          type: [string, "null"]
+          description: The release compared against. NULL when this is the first in its system.
+        isFirst: { type: boolean }
+        noComparable:
+          type: boolean
+          description: Present when a previous release exists but carries nothing comparable.
+        platforms:
+          type: object
+          properties:
+            added: { type: array, items: { $ref: "#/components/schemas/Platform" } }
+            removed: { type: array, items: { $ref: "#/components/schemas/Platform" } }
+        cores:
+          type: array
+          items: { $ref: "#/components/schemas/CoreMove" }
+        plugins:
+          type: array
+          items: { $ref: "#/components/schemas/PluginMove" }
+        config:
+          type: array
+          items: { $ref: "#/components/schemas/ConfigMove" }
+        no_op:
+          type: boolean
+          description: |
+            True when this release changes nothing. Computed from the three lists above,
+            and false whenever there is nothing to compare against — being first is not
+            the same as changing nothing.
+
+    CoreMove:
+      type: object
+      properties:
+        platform: { $ref: "#/components/schemas/Platform" }
+        from: { type: [string, "null"], description: NULL when the platform is new to this line. }
+        to: { type: string }
+        change: { type: string, enum: [added, updated] }
+
+    PluginMove:
+      type: object
+      properties:
+        platform: { $ref: "#/components/schemas/Platform" }
+        name: { type: string }
+        change: { type: string, enum: [added, removed, changed, unchanged] }
+        from: { type: [string, "null"] }
+        to: { type: [string, "null"] }
+
+    ConfigMove:
+      type: object
+      properties:
+        platform: { $ref: "#/components/schemas/Platform" }
+        target: { type: string, description: The file or component the parameter belongs to. }
+        param: { type: string }
+        change: { type: string, enum: [added, removed, changed, unchanged] }
+        from: {}
+        to: {}
+
+    Finding:
+      type: object
+      description: |
+        A machine-readable note from bundle inspection, used for both warnings and the
+        findings attached to a refusal. Branch on `rule`; `message` is prose for a person.
+      required: [rule, message]
+      properties:
+        rule:
+          type: string
+          description: |
+            Stable name of the check. `config_only_needs_platforms` is the one a client
+            must handle: a bundle carrying only configuration names no target platforms,
+            and the operator has to supply them before it can be staged.
+            `channel_rollback` is the other: the channel would move backwards, and the
+            caller may proceed by re-sending with `allow_rollback`.
+            `release_in_use` refuses removing a build a channel is serving;
+            `channels` names every channel serving it.
+        message: { type: string }
+        from:
+          type: string
+          description: |
+            `channel_rollback` only — the version the channel is on now. Absent on findings
+            that describe a bundle rather than a move, which is why it is not required.
+        to:
+          type: string
+          description: "`channel_rollback` only — the version the move would point it at."
+        channels:
+          type: array
+          items: { type: string }
+          description: |
+            `release_in_use` only — every `system/channel` serving the release, current at
+            the moment of the refusal. Show these rather than a list from an earlier
+            catalog fetch.
+
+    Inspection:
+      type: object
+      description: |
+        What the server read out of a bundle. Presented to an operator before anything is
+        stored, so every field here is something a person is expected to act on.
+      properties:
+        format: { type: [string, "null"] }
+        version: { type: [string, "null"] }
+        platforms: { type: array, items: { $ref: "#/components/schemas/Platform" } }
+        cores: { type: array, items: { $ref: "#/components/schemas/InspectedCore" } }
+        plugins: { type: array, items: { $ref: "#/components/schemas/InspectedPlugin" } }
+        configs: { type: array, items: { $ref: "#/components/schemas/ShippedConfigFile" } }
+        release: { $ref: "#/components/schemas/BundleRelease" }
+        warnings: { type: array, items: { $ref: "#/components/schemas/Finding" } }
+
+    InspectedCore:
+      type: object
+      properties:
+        platform: { $ref: "#/components/schemas/Platform" }
+        path: { type: string }
+        slice_version: { type: [string, "null"] }
+        system:
+          type: [string, "null"]
+          description: The system this slice was stamped for; what a bundled plugin has to cover.
+        bundled_plugins: { type: array, items: { $ref: "#/components/schemas/BundledPlugin" } }
+        shipped_config: { type: array, items: { $ref: "#/components/schemas/ShippedConfigFile" } }
+
+    BundledPlugin:
+      type: object
+      description: A plugin riding inside a core slice. Named separately rather than filed under the core, because which product it covers is a different question from where it sits.
+      properties:
+        name: { type: string }
+        version: { type: [string, "null"] }
+        version_known: { type: boolean }
+        systems:
+          type: array
+          items: { type: string }
+          description: Products this plugin declares itself valid on. EMPTY MEANS EVERYTHING, the same reading the node gives it.
+
+    InspectedPlugin:
+      type: object
+      properties:
+        name: { type: string }
+        platform: { $ref: "#/components/schemas/Platform" }
+        path: { type: string }
+        version: { type: [string, "null"] }
+        version_known: { type: boolean }
+        systems: { type: array, items: { type: string } }
+        shipped_config: { type: array, items: { $ref: "#/components/schemas/ShippedConfigFile" } }
+
+    ShippedConfigFile:
+      type: object
+      description: |
+        One configuration file the bundle ships. A file with no params is still recorded:
+        it is not a config file, but it still replaces whatever the node has.
+      properties:
+        file: { type: string }
+        plugin: { type: [string, "null"], description: The plugin it belongs to, or NULL for the core. }
+        params: { type: array, items: { $ref: "#/components/schemas/ConfigParam" } }
+
+    ConfigParam:
+      type: object
+      properties:
+        param: { type: string, description: 'Dotted `group.key`.' }
+        value: {}
+        locked:
+          type: boolean
+          description: |
+            A locked parameter keeps the node's own value and will NOT be applied. This is
+            why an operator must see locked and unlocked apart — the two halves of a config
+            payload have opposite effects on a device.
+        readonly: { type: boolean }
+
+    BundleRelease:
+      type: object
+      description: Release metadata from an optional release.json at the archive root — the only metadata the bundle manifest cannot carry. camelCase, as the code emits it.
+      properties:
+        system: { type: [string, "null"] }
+        minVersion: { type: [string, "null"] }
+        mandatory: { type: boolean }
+        notes: { type: [string, "null"] }
+        configDropped: { type: array, items: { type: string } }
+
+    StagedUpload:
+      type: object
+      required: [token, stored]
+      properties:
+        token: { type: string }
+        version: { $ref: "#/components/schemas/Version" }
+        system: { type: [string, "null"] }
+        kind: { type: [string, "null"] }
+        platform: { $ref: "#/components/schemas/Platform" }
+        platforms: { type: array, items: { $ref: "#/components/schemas/Platform" } }
+        size: { type: integer }
+        sha256: { type: string }
+        stored:
+          type: boolean
+          const: false
+          description: Nothing is written yet. Without this the panel reads as done, because it looks exactly like the one that comes after the write.
+        diff: { $ref: "#/components/schemas/Diff" }
+        inspection: { $ref: "#/components/schemas/Inspection" }
+
+    CommittedUpload:
+      allOf:
+        - $ref: "#/components/schemas/Artifact"
+        - type: object
+          properties:
+            release_created: { type: boolean }
+            promoted_to: { type: [string, "null"] }
+            system: { type: [string, "null"] }
+            stored: { type: boolean, const: true }
+            diff: { $ref: "#/components/schemas/Diff" }
+            inspection: { $ref: "#/components/schemas/Inspection" }
+
+    UnclassifiedNode:
+      type: object
+      description: A row of `unclassified_node` — a device this server has seen but cannot place.
+      properties:
+        serial: { type: string }
+        platform: { $ref: "#/components/schemas/Platform" }
+        version: { $ref: "#/components/schemas/Version" }
+        role: { type: [string, "null"] }
+        channel: { type: [string, "null"] }
+        fleet: { type: [string, "null"] }
+        reported_system:
+          type: [string, "null"]
+          description: |
+            What the node said it was, from its own manifest. NULL means it sent
+            nothing at all, which is a DIFFERENT situation from naming a system
+            this server does not have: the first is a build that was never
+            stamped, the second is a misconfiguration. A screen that collapses
+            the two sends an operator looking in the wrong place.
+        first_seen: { type: string, format: date-time }
+        last_seen: { type: string, format: date-time }
+        seen_count: { type: integer }
+        assigned_system:
+          type: [string, "null"]
+          description: NULL while the node is still pending an admin's decision. Nothing resolves itself with time.
+        assigned_at: { type: [string, "null"], format: date-time }
+        assigned_by: { type: [string, "null"] }
+
+    SigningKey:
+      type: object
+      properties:
+        key_id: { type: string }
+        public_key_base64:
+          type: [string, "null"]
+          description: NULL under `SIGNING_REQUIRE_PRESIGNED`, where there is no local key pair at all. That is the goal state, not an error.
+        algorithm: { type: string, const: ed25519 }
+        key_file: { type: [string, "null"] }
+        holds_private_key: { type: boolean }
+        root_key_id: { type: [string, "null"] }
+      additionalProperties: true
+
+    Catalog:
+      type: object
+      properties:
+        revision: { type: [string, integer] }
+        systems: { type: array, items: { $ref: "#/components/schemas/System" } }
+        unclassified_pending: { type: integer }
+        channels: { type: array, items: { $ref: "#/components/schemas/Channel" } }
+        stray_channels:
+          type: array
+          description: Channels pointing at a system that no longer defines them. They serve nothing, silently — the failure that looks like a working rollout.
+          items:
+            type: object
+            properties:
+              system: { type: string }
+              channel: { type: string }
+              nodes:
+                type: integer
+                description: |
+                  How many DISTINCT serials asked for it in the window. This is the
+                  difference between a stale row and an incident happening now — a
+                  banner listing only names cannot tell an operator which it is.
+              last_seen:
+                type: string
+                format: date-time
+                description: The most recent check-in for this system/channel pair.
+        releases:
+          type: array
+          items:
+            type: object
+            properties:
+              version: { $ref: "#/components/schemas/Version" }
+              system: { type: string }
+              artifacts: { type: array, items: { $ref: "#/components/schemas/Artifact" } }
+            additionalProperties: true
+
+    FleetNode:
+      type: object
+      description: |
+        The most recent check-in per serial, from `check_log`. This is a
+        SIGHTING, not an inventory: a node appears here because it asked, so a
+        device that has stopped asking keeps its last row and looks healthy.
+        Read `at` before reading anything else.
+      properties:
+        serial: { type: string }
+        platform: { $ref: "#/components/schemas/Platform" }
+        version: { $ref: "#/components/schemas/Version" }
+        role: { type: [string, "null"] }
+        channel: { type: [string, "null"] }
+        offered:
+          type: [string, "null"]
+          description: The version the server offered on that check, or NULL when it offered nothing.
+        update_available: { type: boolean }
+        at: { type: string, format: date-time }
+        system: { type: [string, "null"] }
+
+    RolloutStat:
+      type: object
+      description: |
+        Reports grouped by outcome and error text, most common first. Anything
+        other than `success` counts against the release — the group is the unit
+        an operator judges a rollout by.
+      properties:
+        result: { type: string }
+        error:
+          type: string
+          description: '`(none)` when the node reported no error text, so the group is never keyed on an empty string.'
+        count: { type: integer }
+
+    NodeReport:
+      type: object
+      description: One row of `node_report` — what a single node said happened.
+      properties:
+        id: { type: integer }
+        serial: { type: string }
+        platform: { $ref: "#/components/schemas/Platform" }
+        role: { type: [string, "null"] }
+        from_version: { type: [string, "null"] }
+        to_version: { type: [string, "null"] }
+        result: { type: string }
+        error: { type: [string, "null"] }
+        at:
+          type: [string, "null"]
+          format: date-time
+          description: When the node says it happened. Node clocks are not trustworthy; `received_at` is this server's own.
+        received_at: { type: string, format: date-time }
+
+    AuditEntry:
+      type: object
+      description: |
+        Actions worth keeping a trace of, including reads — fetching the fleet
+        API keys is audited even though the caller is already an authenticated
+        admin, because the key is shared and seeing it is equivalent to holding it.
+      properties:
+        id: { type: integer }
+        at: { type: string, format: date-time }
+        actor: { type: string }
+        action: { type: string }
+        subject: { type: [string, "null"] }
+        detail:
+          type: [object, "null"]
+          additionalProperties: true
+          description: Never a password, and never its length.
+
+    RealmUser:
+      type: object
+      description: |
+        An account as Keycloak reports it (brief representation). Roles are NOT
+        here: they live in the realm and this server only reads them off a
+        presented token, so this list cannot say what any of these accounts may
+        do on this server.
+      properties:
+        id: { type: string }
+        username: { type: string }
+        email: { type: [string, "null"], format: email }
+        enabled: { type: boolean }
+        created_at: { type: [string, "null"], format: date-time }
+
+    FleetApiKey:
+      type: object
+      description: |
+        Parsed out of `UPDATE_API_KEYS`, never out of the database. An entry with
+        no `name:` prefix is given a positional name (`fleet-1`).
+      properties:
+        fleet: { type: string }
+        key:
+          type: string
+          description: The literal credential. Shared by every node in that fleet — this response is why the read is audited.
+
+    TlsInfo:
+      type: object
+      description: |
+        The certificate captured at boot, so the UI can say what browsers and
+        nodes must be told to trust. The private key is stripped before this is
+        ever stored, so it cannot leak through here.
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+          description: False only when the server never completed TLS setup; every other field is then absent.
+        generated:
+          type: boolean
+          description: True when this server made the certificate itself on first boot.
+        subject: { type: string }
+        issuer: { type: string }
+        validFrom: { type: string }
+        validTo: { type: string }
+        fingerprint256:
+          type: string
+          description: What an operator pins on a node, and what the boot log prints.
+        subjectAltName:
+          type: string
+          description: |
+            Empty is the usual reason the UI works on localhost and nothing else:
+            a certificate that does not name the address a client dials fails
+            verification there, and a node with TLS rejects it outright with no
+            way to click through.
+        selfSigned: { type: boolean }
+        daysRemaining: { type: [integer, "null"] }
+
+    OidcStatus:
+      type: object
+      required: [enabled, reachable]
+      properties:
+        enabled:
+          type: boolean
+          description: Whether this server has an issuer configured at all.
+        reachable:
+          type: boolean
+          description: |
+            Whether that issuer answered just now. The sign-in page needs BOTH:
+            with no provider reachable there is no way to sign in at all, and
+            the page must say so rather than offer a button that redirects into
+            an outage.

@@ -42,11 +42,14 @@
             <button type="submit" id="upload-btn">Upload</button>
           </form>
 
-          <p class="hint">
-            Version, platforms, plugin versions and config params all come out of the bundle.
-            Release notes and <code>min_version</code> come from an optional
-            <code>release.json</code> inside it.
-          </p>
+          <details class="why">
+            <summary>What the bundle decides</summary>
+            <p>
+              Version, platforms, plugin versions and config params all come out of the bundle.
+              Release notes and <code>min_version</code> come from an optional
+              <code>release.json</code> inside it.
+            </p>
+          </details>
 
           <div id="progress-wrap" hidden>
             <div class="progress"><div id="progress-bar"></div></div>
@@ -101,16 +104,19 @@
       <section id="tab-systems" class="tab" hidden>
         <div class="card">
           <h2>Systems</h2>
-          <p class="hint">
-            The kinds of device AeroCore runs on. Each has its own plugin set, its own config
-            and its own version line. A bundle names its system in the
-            <code>system</code> field its build stamps into every manifest, and a node is
-            placed by the version it reports.
-          </p>
+          <details class="why">
+            <summary>What a system is</summary>
+            <p>
+              The kinds of device AeroCore runs on. Each has its own plugin set, its own config
+              and its own version line. A bundle names its system in the
+              <code>system</code> field its build stamps into every manifest, and a node says
+              which system it is on every check. Two systems may use the same version number.
+            </p>
+          </details>
           <div id="system-list"></div>
         </div>
 
-        <div class="card">
+        <div class="card" id="system-create">
           <h2>Create a system</h2>
           <form id="system-form" class="grid">
             <label for="s-name">Name</label>
@@ -124,11 +130,14 @@
 
         <div class="card">
           <h2>Unplaced nodes <span id="unclassified-count" class="hint"></span></h2>
-          <p class="hint">
-            Nodes reporting a version this server never published — factory-fresh or hand
-            flashed. They are offered nothing until assigned, because guessing would mean
-            pushing one system's firmware to another.
-          </p>
+          <details class="why">
+            <summary>Why a node lands here</summary>
+            <p>
+              Nodes claiming a system this server does not have — usually a typo in a build
+              script. They are offered nothing until assigned, because guessing would mean
+              pushing one system's firmware to another.
+            </p>
+          </details>
           <div id="unclassified-list"></div>
         </div>
       </section>
@@ -162,12 +171,15 @@
       <section id="tab-security" class="tab" hidden>
         <div class="card" id="users-card" hidden>
           <h2>Accounts</h2>
-          <p class="hint">
-            Accounts live in Keycloak, so one created here also signs in to AeroCore and
-            aerotunnel. A new account gets the <strong>customer</strong> role &mdash; the
-            lowest privilege level &mdash; and its temporary password must be changed at
-            first sign-in. Anything beyond that is granted in Keycloak, deliberately.
-          </p>
+          <details class="why">
+            <summary>What creating an account here does</summary>
+            <p>
+              Accounts live in Keycloak, so one created here also signs in to AeroCore and
+              aerotunnel. A new account gets the <strong>customer</strong> role &mdash; the
+              lowest privilege level &mdash; and its temporary password must be changed at
+              first sign-in. Anything beyond that is granted in Keycloak, deliberately.
+            </p>
+          </details>
           <form id="new-user-form" class="grid">
             <label for="u-name">Username</label>
             <input id="u-name" type="text" autocomplete="off" required />
@@ -187,11 +199,14 @@
         </div>
         <div class="card">
           <h2>Fleet API key</h2>
-          <p class="hint">
-            What a node sends as <code>X-API-Key</code>. One key is shared by every node in a
-            fleet, so rotating it means re-provisioning them all. Reading it here is recorded in
-            the audit log.
-          </p>
+          <details class="why">
+            <summary>What this key unlocks</summary>
+            <p>
+              What a node sends as <code>X-API-Key</code>. One key is shared by every node in a
+              fleet, so rotating it means re-provisioning them all. Reading it here is recorded
+              in the audit log.
+            </p>
+          </details>
           <div id="api-keys"></div>
         </div>
 

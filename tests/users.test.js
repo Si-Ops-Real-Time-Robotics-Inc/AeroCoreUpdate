@@ -85,4 +85,32 @@ describe('POST /admin/api/users', { skip: hasDatabase ? false : SKIP_MESSAGE }, 
     assert.equal(res.status, 400);
     assert.match(res.json().message, /not configured/i);
   });
+
+  /**
+   * Self-service sign-up is OFF unless ALLOW_SELF_REGISTRATION says otherwise, and this suite
+   * does not set it. The open case is register.test.js — config reads process.env once, so a
+   * file gets one configuration.
+   */
+  test('self-service registration is off by default', async () => {
+    const probe = await server.request('/admin/api/auth/registration');
+    assert.equal(probe.status, 200);
+    assert.equal(probe.json().enabled, false);
+
+    const res = await server.request('/admin/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'stranger', password: 'chosen-password-1' }),
+    });
+    assert.equal(res.status, 403);
+  });
+
+  /** Refused before the body is parsed: a disabled endpoint does not describe its schema. */
+  test('a disabled endpoint refuses without validating', async () => {
+    const res = await server.request('/admin/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'no spaces', password: 'x' }),
+    });
+    assert.equal(res.status, 403);
+  });
 });

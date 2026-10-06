@@ -1,4 +1,4 @@
-import { unauthorized, upgradeRequired } from '../core/errors.js';
+import { forbidden, unauthorized, upgradeRequired } from '../core/errors.js';
 import { authenticate } from '../services/auth.service.js';
 
 /**
@@ -17,6 +17,31 @@ export function requireAuth(handler) {
     req.user = await authenticate(header.slice(7).trim());
     return handler(req, res);
   };
+}
+
+/**
+ * The same, plus one question `requireAuth` cannot answer: may THIS account do THIS thing.
+ *
+ * Written as a decorator rather than a pipeline step for the reason apiKey.js gives —
+ * Router.use() only accepts a Router, and a path allowlist would state the route table twice.
+ * The upside is that the routes file becomes the permission model: every line names both the
+ * handler and what it takes to reach it, reviewable in one screen.
+ *
+ * The scope is left on the returned function so a test can walk the router and fail on any
+ * route that declares none. Deny-by-default is only true if nothing can be added without
+ * deciding — and the way that rule dies is a new route quietly landing under `requireAuth`.
+ */
+export function requireScope(scope, handler) {
+  const guarded = requireAuth(async (req, res) => {
+    if (!req.user?.scopes?.has(scope)) {
+      throw forbidden(`This account may not do that: it lacks the "${scope}" permission. `
+        + 'Uploading to the catalog and publishing to the fleet are deliberately different '
+        + 'rights; see docs/rbac-proposal.md.');
+    }
+    return handler(req, res);
+  });
+  guarded.scope = scope;
+  return guarded;
 }
 
 /**

@@ -26,7 +26,7 @@ describe('health, TLS, errors and signing', { skip: hasDatabase ? false : SKIP_M
 
   test('every fleet endpoint refuses a missing or wrong API key', async () => {
     const endpoints = [
-      ['GET', '/api/v1/update/check?serial=S&platform=linux-x86_64&version=0.1.0'],
+      ['GET', '/api/v1/update/check?system=default&serial=S&platform=linux-x86_64&version=0.1.0'],
       ['GET', '/api/v1/update/download/0.15.0?platform=linux-x86_64'],
       ['POST', '/api/v1/update/report'],
     ];
@@ -165,7 +165,7 @@ describe('health, TLS, errors and signing', { skip: hasDatabase ? false : SKIP_M
 
   test('the fleet API carries no HSTS — a node is not a browser', async () => {
     const res = await server.request(
-      '/api/v1/update/check?serial=S&platform=linux-x86_64&version=0.1.0',
+      '/api/v1/update/check?system=default&serial=S&platform=linux-x86_64&version=0.1.0',
       { headers: { 'X-API-Key': API_KEY } },
     );
     assert.equal(res.headers['strict-transport-security'], undefined);

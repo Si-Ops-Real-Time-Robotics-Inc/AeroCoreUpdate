@@ -1,4 +1,4 @@
-# AeroServer — AeroCore OTA Update Server
+# AeroCoreUpdate — AeroCore OTA Update Server
 
 Server phát bản cập nhật cho fleet GCS/AIR, cài đặt đúng theo [`docs/update-server-api.md`](docs/update-server-api.md) (spec normative) và [`docs/update-server-openapi.json`](docs/update-server-openapi.json).
 
@@ -13,7 +13,7 @@ Kèm theo là **web UI quản trị** (đăng nhập JWT) để upload gói, đ�
 ```bash
 cp .env.example .env      # điền DB_PASSWORD, JWT_SECRET, UPDATE_API_KEYS
 docker compose up -d --build
-docker compose logs aeroserver | head -30
+docker compose logs aerocoreupdate | head -30
 ```
 
 Log khởi động in ra ba thứ cần lưu lại:
